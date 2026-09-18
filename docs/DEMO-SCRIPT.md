@@ -37,6 +37,21 @@ Each local scenario takes 30–60 s on a CPU-only model; cut around the wait, ne
 terminal. The Ask box has no 30 s timeout locally, but keep to the fast denial prompts anyway so
 the cloud and local recordings match.
 
+### Recording it solo on Windows
+
+1. Two terminals: `ollama serve` in one; `PYTHONPATH=src python local_demo/server.py` in the
+   other (opens http://localhost:8787). Snap the browser to the left half of the screen, a third
+   terminal to the right half, font size 16+.
+2. In that third terminal: `PYTHONPATH=src python local_demo/record.py`. It shows each beat's
+   title and the line to read, waits for Enter, runs the scenario. Rehearse once with `--dry`.
+3. Record with the Xbox Game Bar: **Win+G**, then **Win+Alt+R** to start/stop (records the
+   active window; click the terminal first). Mic: Win+G -> Capture -> mic on. Or use OBS for
+   the full screen. Clips land in `Videos\Captures`.
+4. Read the line, press Enter, wait for the audit row to appear on the dashboard, next beat.
+   Pauses are fine; cut them out afterwards (Clipchamp is preinstalled on Windows 11).
+5. Trim to under 3:00, add the title card and end card from the table above, upload to YouTube
+   as **unlisted**, then open the link in a private window to confirm it plays signed-out.
+
 Notes for the editor:
 
 - `POST /ask` is synchronous behind a 30 s HTTP API timeout. Use it only for the fast prompts
