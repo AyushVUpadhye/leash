@@ -7,8 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-DEV_INSTANCE = "i-dev0000000000001"
-PROD_INSTANCE = "i-prod000000000001"
+DEV_INSTANCE = "i-0de70000000000001"
+PROD_INSTANCE = "i-0a0d0000000000001"
 ECS_CLUSTER = "leash-dev"
 ECS_SERVICE = "leash-api-dev"
 ASG_NAME = "leash-dev-asg"

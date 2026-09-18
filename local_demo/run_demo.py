@@ -55,7 +55,7 @@ def run_one(key: str, world) -> None:
     if world.notifications:
         subj, msg = world.notifications[-1]
         print(f"\nsns notify: {subj}\n  {msg[:200]}")
-    print(f"\nworld state: disk[dev]={world.instances['i-dev0000000000001']['disk_used_percent']:.0f}%  "
+    print(f"\nworld state: disk[dev]={world.instances['i-0de70000000000001']['disk_used_percent']:.0f}%  "
           f"ecs running={world.ecs_services[('leash-dev', 'leash-api-dev')]['running']}  "
           f"asg desired={world.asgs['leash-dev-asg']['desired']}")
     _hr("=")

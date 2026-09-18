@@ -24,9 +24,9 @@ class World:
 
     def __init__(self):
         self.instances = {
-            "i-dev0000000000001": {"env": "dev", "name": "leash-dev-web", "state": "running",
+            "i-0de70000000000001": {"env": "dev", "name": "leash-dev-web", "state": "running",
                                     "disk_used_percent": 42.0},
-            "i-prod000000000001": {"env": "prod", "name": "leash-prod-db", "state": "running",
+            "i-0a0d0000000000001": {"env": "prod", "name": "leash-prod-db", "state": "running",
                                     "disk_used_percent": 55.0},
         }
         self.ecs_services = {

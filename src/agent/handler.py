@@ -96,6 +96,75 @@ def build_alarm_prompt(parsed: dict) -> str:
     )
 
 
+_RESOURCE_TOKEN = re.compile(r"\b(?:i-[0-9a-f]{8,17}|leash-[a-z0-9-]+)\b")
+
+
+def build_chat_prompt(message: str) -> str:
+    """Wrap a human request so small models act through tools instead of narrating them."""
+    ids = sorted(set(_RESOURCE_TOKEN.findall(message)))
+    id_line = (
+        f"Resource ids named in the request (copy them exactly, never alter or invent one): "
+        f"{', '.join(ids)}\n\n" if ids else ""
+    )
+    return (
+        f"A human operator asks: {message}\n\n"
+        f"{id_line}"
+        "Rules for answering:\n"
+        "  - Act ONLY by calling tools. Never write a tool call as text or JSON in your reply.\n"
+        "  - If the request names an EC2 instance (i-...), an ECS cluster/service, or an Auto "
+        "Scaling group, call the matching tool exactly once, even if you expect it to be denied - "
+        "the denial must be audited.\n"
+        "  - If a tool returns DENIED, report it verbatim with the policy ids and stop.\n"
+        "  - Finish with one short paragraph: what was asked, what you did or were denied, current state."
+    )
+
+
+_INSTANCE_ID = re.compile(r"\bi-[0-9a-f]{8,17}\b")
+
+
+MUTATING_TOOLS = {"clean_disk", "restart_service", "scale_group", "terminate_instance"}
+
+
+def _tools_used(agent) -> set[str]:
+    """Names of every tool called in this run, from toolUse blocks (strands.types.content.ContentBlock)."""
+    names = set()
+    for message in getattr(agent, "messages", []) or []:
+        for block in message.get("content", []) or []:
+            if isinstance(block, dict) and "toolUse" in block:
+                names.add(str((block["toolUse"] or {}).get("name", "")))
+    return names
+
+
+def _retry_nudge(original: str) -> str:
+    ids = sorted(set(_INSTANCE_ID.findall(original)))
+    id_line = f"The exact instance id in the request is: {', '.join(ids)}. " if ids else ""
+    return (
+        "You did not call the action tool, so nothing was decided and nothing was audited. Do "
+        "NOT decide yourself whether the action is allowed - the Cedar policy engine decides, and "
+        f"every decision must be recorded. {id_line}Call the ONE mutating tool that matches the "
+        "request now (clean_disk, restart_service, scale_group or terminate_instance) with exactly "
+        "the ids from the request - never invent an id. If it returns DENIED, report that verbatim "
+        "with the policy ids. Do not write JSON or pseudo-code."
+    )
+
+
+def _run_agent(agent, prompt: str, original: str = "", require_mutation: bool = False) -> str:
+    """Run the agent; retry once if it did not act.
+
+    "Did not act" means no tool call at all, or - for human requests (require_mutation) - no
+    mutating tool call. Small local models sometimes narrate a call as text, or refuse on their
+    own judgement after seeing an env tag; either way Cedar never decided and nothing was
+    audited, which defeats the point. Checking the message history is model-agnostic.
+    """
+    reply = str(agent(prompt)).strip()
+    used = _tools_used(agent)
+    acted = bool(used & MUTATING_TOOLS) if require_mutation else bool(used)
+    if not acted:
+        log.warning("model did not act (tools used: %s); retrying once", sorted(used))
+        reply = str(agent(_retry_nudge(original or prompt))).strip()
+    return reply
+
+
 def _get_agent(incident_id: str):
     global _AGENT
     if _AGENT is None:
@@ -119,7 +188,7 @@ def handler(event, context):
         if not parsed["message"]:
             return {"reply": "empty message", "incident_id": incident_id}
         tools.set_context(incident_id, "")
-        prompt = f"A human operator asks: {parsed['message']}"
+        prompt = build_chat_prompt(parsed["message"])
     elif parsed["mode"] == "alarm":
         incident_id = f"{_slug(parsed['alarm_name'])}-{ts}"
         if parsed["state"] != "ALARM":
@@ -131,7 +200,7 @@ def handler(event, context):
 
     try:
         agent = _get_agent(incident_id)
-        reply = str(agent(prompt)).strip()
+        reply = _run_agent(agent, prompt, parsed["message"], require_mutation=(parsed["mode"] == "chat"))
     except Exception as exc:
         log.exception("agent run failed")
         reply = f"agent error: {exc}"
