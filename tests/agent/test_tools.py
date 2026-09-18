@@ -44,14 +44,16 @@ class FakeEcs:
 
     def describe_services(self, cluster, services):
         return {"services": [{"serviceArn": f"arn:aws:ecs:us-east-1:1:service/{cluster}/{services[0]}",
-                              "runningCount": 0, "desiredCount": 1, "status": "ACTIVE"}]}
+                              "runningCount": 0, "desiredCount": self.desired, "status": "ACTIVE"}]}
 
     def list_tags_for_resource(self, resourceArn):
         return {"tags": [{"key": "env", "value": self.env}] if self.env else {"tags": []}}
 
+    desired = 1
+
     def update_service(self, **kwargs):
         self.updated.append(kwargs)
-        return {"service": {"desiredCount": 1, "status": "ACTIVE"}}
+        return {"service": {"desiredCount": kwargs.get("desiredCount", self.desired), "status": "ACTIVE"}}
 
 
 class FakeAsg:
@@ -145,6 +147,14 @@ def test_restart_service_allowed(clients, allow, audit_rows):
     assert out.startswith("ALLOWED")
     assert clients["ecs"].updated[0] == {"cluster": "leash-dev", "service": "leash-api-dev", "forceNewDeployment": True}
     assert allow[0]["resource_type"] == "EcsService" and allow[0]["resource_id"] == "leash-dev/leash-api-dev"
+
+
+def test_restart_service_restores_desired_count_when_zero(clients, allow):
+    clients["ecs"].desired = 0
+    out = tools.restart_service("leash-dev", "leash-api-dev")
+    assert out.startswith("ALLOWED") and "desired count was 0, set to 1" in out
+    assert clients["ecs"].updated[0] == {"cluster": "leash-dev", "service": "leash-api-dev",
+                                         "forceNewDeployment": True, "desiredCount": 1}
 
 
 def test_scale_group_passes_context_and_denial_skips_call(clients, monkeypatch, decision_cls, audit_rows):

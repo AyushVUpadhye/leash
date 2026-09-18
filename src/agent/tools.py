@@ -184,7 +184,8 @@ def clean_disk(instance_id: str) -> str:
 
 @tool
 def restart_service(cluster: str, service: str) -> str:
-    """Force a new deployment of an ECS service (rolls its tasks). Requires Cedar restartService.
+    """Bring an ECS service back: force a new deployment (rolls its tasks), and if its desired
+    count has dropped to 0 set it back to 1. Requires Cedar restartService.
 
     Args:
         cluster: ECS cluster name
@@ -198,9 +199,17 @@ def restart_service(cluster: str, service: str) -> str:
         return _denied("restartService", rid, env, decision, ok)
     try:
         # https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateService.html
-        resp = aws.client("ecs").update_service(cluster=cluster, service=service, forceNewDeployment=True)
+        kwargs = {"cluster": cluster, "service": service, "forceNewDeployment": True}
+        try:
+            if aws.describe_service(cluster, service)["desired"] == 0:
+                kwargs["desiredCount"] = 1  # the service was left with no tasks at all
+        except Exception:  # noqa: BLE001 - if we cannot read it, just force the deployment
+            pass
+        resp = aws.client("ecs").update_service(**kwargs)
         svc = resp.get("service", {})
         result = f"forceNewDeployment issued; desired={svc.get('desiredCount', '?')} status={svc.get('status', '?')}"
+        if "desiredCount" in kwargs:
+            result = "desired count was 0, set to 1; " + result
     except Exception as exc:
         result = f"error: {exc}"
     ok = _audit("restartService", "EcsService", rid, env, decision, result)

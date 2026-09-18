@@ -118,10 +118,12 @@ class _FakeECS:
         env = WORLD.ecs_services.get((cluster, svc), {}).get("env", "unknown")
         return {"tags": [{"key": "env", "value": env}]}
 
-    def update_service(self, cluster, service, forceNewDeployment):
+    def update_service(self, cluster, service, forceNewDeployment=False, desiredCount=None):
         state = WORLD.ecs_services.get((cluster, service))
         if state:
-            state["running"] = state["desired"]  # a real forced redeploy restores the task
+            if desiredCount is not None:
+                state["desired"] = desiredCount
+            state["running"] = state["desired"]  # a real forced redeploy restores the tasks
         return {"service": {"desiredCount": state["desired"] if state else 0, "status": "ACTIVE"}}
 
 
