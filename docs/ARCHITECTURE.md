@@ -23,8 +23,11 @@
    decision, the policy ids that determined it, and the result string. Denied calls are audited
    too — that is the point.
 8. The agent ends with `notify()` (SNS) and a one-paragraph summary.
-9. The **API Lambda** serves `GET /audit` (DynamoDB GSI query, newest first) and `POST /ask`
-   (synchronous invoke of the agent in chat mode) to the static S3 dashboard.
+9. The **API Lambda** serves `GET /audit` (DynamoDB GSI query, newest first), `GET /policies`
+   (ListPolicies + GetPolicy on the store, ids translated to names, so the dashboard shows the
+   exact text being enforced) and `POST /ask` (synchronous invoke of the agent in chat mode) to
+   the static S3 dashboard. The dashboard derives its "Alarm → fixed" figure from the rows: an
+   incident id ends in the handler's start time, each row's `sk` is when the decision landed.
 
 ## Defence in depth: Cedar vs IAM
 
@@ -76,7 +79,8 @@ src/common/audit.py      write_audit() / list_audit() (Lane B)
 src/agent/               Strands agent + tools (Lane A)
 src/api/handler.py       /health, /audit, /ask (Lane D)
 dashboard/index.html     static audit dashboard; config.js generated at deploy (Lane D)
-scripts/                 deploy, break-disk, kill-task, stop-prod, ask, teardown (Lane C)
+scripts/                 deploy, break-disk, kill-task, inject-tag, stop-prod, ask, teardown (Lane C)
+.github/workflows/ci.yml pytest + cfn-lint + sam validate on every push and pull request
 tests/authz/             real Cedar evaluation of the four policies (cedarpy), file/template byte-identity
 tests/agent, tests/api   tool and handler tests with fake boto3 clients; no AWS calls
 docs/                    this file, WRITEUP.md, DEMO-SCRIPT.md

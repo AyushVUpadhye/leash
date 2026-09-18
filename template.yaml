@@ -250,6 +250,11 @@ Resources:
   LeashApi:
     Type: AWS::Serverless::HttpApi
     Properties:
+      # The dashboard URL is public and /ask spends Bedrock tokens: cap it so a
+      # shared link cannot burn the credits. 5 req/s sustained, 10 burst.
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 5
       CorsConfiguration:
         AllowOrigins: ["*"]
         AllowMethods: ["*"]
@@ -259,7 +264,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-api"
-      Description: Thin HTTP front for the dashboard; reads audit, forwards /ask to the agent.
+      Description: Thin HTTP front for the dashboard; reads audit + policies, forwards /ask to the agent.
       CodeUri: src/
       Layers: [!Ref DepsLayer]
       Handler: api.handler.handler
@@ -269,6 +274,10 @@ Resources:
         Variables:
           AUDIT_TABLE: !Ref AuditTable
           AGENT_FUNCTION_NAME: !Ref AgentFunction
+          # GET /policies reads the Cedar text straight from the store, so the
+          # dashboard shows exactly what is being enforced.
+          POLICY_STORE_ID: !GetAtt Authz.Outputs.PolicyStoreId
+          POLICY_ID_MAP: !GetAtt Authz.Outputs.PolicyIdMap
       Events:
         Health:
           Type: HttpApi
@@ -281,6 +290,12 @@ Resources:
           Properties:
             ApiId: !Ref LeashApi
             Path: /audit
+            Method: GET
+        Policies:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LeashApi
+            Path: /policies
             Method: GET
         Ask:
           Type: HttpApi
@@ -301,6 +316,12 @@ Resources:
               Effect: Allow
               Action: lambda:InvokeFunction
               Resource: !GetAtt AgentFunction.Arn
+            - Sid: ReadTheLeash
+              Effect: Allow
+              Action: [verifiedpermissions:ListPolicies, verifiedpermissions:GetPolicy]
+              Resource: !Sub
+                - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
+                - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
 
   # -------------------------------------------------------------------------
   # Dashboard: public static website bucket. scripts/deploy.sh syncs dashboard/

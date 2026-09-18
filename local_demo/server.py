@@ -87,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-        elif parsed.path in ("/health", "/audit"):
+        elif parsed.path in ("/health", "/audit", "/policies"):
             query = parse_qs(parsed.query)
             self._send_api(_api_event("GET", parsed.path, query, None))
         else:
