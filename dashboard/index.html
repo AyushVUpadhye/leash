@@ -154,8 +154,9 @@
       <button id="send">Send to agent</button>
       <!-- filled by script from LEASH_CONFIG so the prompts carry the deployment's real ids -->
       <ul class="examples" id="examples"></ul>
-      <p class="note">Denials answer in seconds. A cleanup runs up to 90&nbsp;s over SSM and can outlive the
-        30&nbsp;s API timeout; the agent still finishes and its decision still lands in the audit table.</p>
+      <p class="note">Every decision lands in the audit trail the moment the leash makes it, before the agent
+        acts. The reply itself takes as long as the model does: seconds on Bedrock, a few minutes on a
+        laptop CPU model.</p>
       <div id="reply">The agent will diagnose, act only through policy-checked tools, and report what was allowed or denied.</div>
     </section>
   </div>
