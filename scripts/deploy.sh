@@ -35,7 +35,12 @@ dashboard_url="$(stack_output DashboardUrl)"
 
 log "writing dashboard/config.js with apiUrl=$api_url"
 mkdir -p dashboard
-printf 'window.LEASH_CONFIG = { apiUrl: "%s" };\n' "$api_url" > dashboard/config.js
+# Resource ids go into the config too so the dashboard's example prompts name real resources.
+dev_id="$(stack_output DevInstanceId)"
+prod_id="$(stack_output ProdInstanceId)"
+asg_name="$(stack_output AsgName)"
+printf 'window.LEASH_CONFIG = { apiUrl: "%s", devInstanceId: "%s", prodInstanceId: "%s", asgName: "%s" };\n' \
+  "$api_url" "$dev_id" "$prod_id" "$asg_name" > dashboard/config.js
 
 log "syncing dashboard/ to s3://$bucket"
 aws s3 sync dashboard/ "s3://$bucket/" --delete

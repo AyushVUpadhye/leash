@@ -58,13 +58,10 @@
   </section>
   <section>
     <h2>Ask the agent</h2>
-    <textarea id="message" placeholder="e.g. Terminate instance i-0123456789abcdef0"></textarea>
+    <textarea id="message" placeholder="Ask the agent to do something"></textarea>
     <button id="send">Send to agent</button>
-    <ul class="examples">
-      <li>Terminate the dev web instance</li>
-      <li>Scale leash-dev-asg to 10 instances</li>
-      <li>Restart the prod db server</li>
-      <li>What is the disk usage on the dev web instance? (read-only)</li>
+    <!-- filled by script from LEASH_CONFIG so the prompts carry the deployment's real ids -->
+    <ul class="examples" id="examples">
     </ul>
     <p class="note">Denials answer in seconds. A cleanup runs up to 90&nbsp;s over SSM and can outlive the
       30&nbsp;s API timeout; the agent still finishes and its decision still lands in the audit table above.</p>
@@ -76,6 +73,29 @@
 <script>
   // Lane C's deploy script writes config.js as: window.LEASH_CONFIG = { apiUrl: "https://..." };
   var cfg = window.LEASH_CONFIG || {};
+  // Example prompts carry the deployment's real resource ids (deploy.sh writes them from the
+  // stack outputs; local_demo/server.py writes the fake-world ids). The agent has no
+  // "list instances" tool, so a prompt without an id gives the model nothing to act on.
+  var ids = {
+    dev: cfg.devInstanceId || "<dev-instance-id>",
+    prod: cfg.prodInstanceId || "<prod-instance-id>",
+    asg: cfg.asgName || "leash-dev-asg"
+  };
+  var EXAMPLES = [
+    "Terminate instance " + ids.dev + ", it is not needed any more",
+    "Scale " + ids.asg + " to 10 instances, we are expecting a traffic spike",
+    "The prod db instance " + ids.prod + " looks full, can you clean it up?",
+    "What is the disk usage on instance " + ids.dev + "? (read-only)"
+  ];
+  (function () {
+    var ul = document.getElementById("examples");
+    EXAMPLES.forEach(function (text) {
+      var li = document.createElement("li");
+      li.textContent = text;
+      ul.appendChild(li);
+    });
+    document.getElementById("message").placeholder = "e.g. " + EXAMPLES[0];
+  })();
   var API = (cfg.apiUrl || "").replace(/\/+$/, "");
   var $ = function (id) { return document.getElementById(id); };
 
