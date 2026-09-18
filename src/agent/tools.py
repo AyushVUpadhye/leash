@@ -26,7 +26,7 @@ CLEAN_DISK_SCRIPT = [
     "set +e",
     "BEFORE=$(df --output=pcent / | tail -1 | tr -dc '0-9')",
     "echo \"before: $(df -h / | tail -1)\"",
-    "rm -f /tmp/leash-fill*",
+    "rm -f /tmp/leash-fill* /var/tmp/leash-fill*",  # /tmp is tmpfs on AL2023; the demo fills /var/tmp
     "journalctl --vacuum-size=50M >/dev/null 2>&1 || true",
     "find /var/log -type f -name '*.gz' -delete 2>/dev/null || true",
     "sync",
@@ -160,7 +160,7 @@ def get_service_info(cluster: str, service: str) -> str:
 
 @tool
 def clean_disk(instance_id: str) -> str:
-    """Free disk space on an instance via SSM: remove /tmp/leash-fill*, vacuum journald to 50M,
+    """Free disk space on an instance via SSM: remove leash-fill files, vacuum journald to 50M,
     delete rotated *.gz logs under /var/log. Requires Cedar cleanDisk permission.
 
     Args:
