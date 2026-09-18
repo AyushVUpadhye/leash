@@ -5,6 +5,8 @@ Serves three HTTP API (payload format v2) routes behind API Gateway:
     GET  /health        -> {"ok": true}
     GET  /audit?limit=N -> {"items": [...]}   (newest first, via common.audit.list_audit)
     GET  /policies      -> {"items": [...]}   (the Cedar policies, via common.authz.list_policies)
+    GET  /redteam       -> {"items": [...], "summary": {...}}  (attack rows + the numbers)
+    POST /redteam       -> {"run_id": ...}   starts an attack run on the red-team Lambda (async)
     POST /ask           -> invokes the agent Lambda synchronously with
                            {"mode": "chat", "message": ...} and returns its JSON reply.
 
@@ -87,6 +89,49 @@ def _policies(event: dict) -> dict:
     return _response(200, {"items": list_policies()})
 
 
+def _redteam_get(event: dict) -> dict:
+    """Attack rows newest first plus the computed headline numbers."""
+    from common.audit import list_redteam
+    from redteam.runner import summarise
+
+    params = event.get("queryStringParameters") or {}
+    try:
+        limit = int(params.get("limit", 200))
+    except (TypeError, ValueError):
+        return _error(400, "limit must be an integer")
+    rows = list_redteam(limit=max(1, min(limit, 500)))
+    return _response(200, {"items": rows, "summary": summarise(rows)})
+
+
+MAX_REDTEAM_N = 100
+
+
+def _redteam_post(event: dict) -> dict:
+    """Kick off a run: n attacks, both arms by default. Returns immediately; rows stream in."""
+    try:
+        body = _read_body(event)
+    except (ValueError, UnicodeDecodeError) as exc:
+        return _error(400, f"invalid JSON body: {exc}")
+    try:
+        n = int(body.get("n", 20))
+    except (TypeError, ValueError):
+        return _error(400, "'n' must be an integer")
+    n = max(1, min(n, MAX_REDTEAM_N))
+    arms = body.get("arms") or ["leashed", "unleashed"]
+    if not isinstance(arms, list) or not set(arms) <= {"leashed", "unleashed"}:
+        return _error(400, "'arms' must be a list of 'leashed' and/or 'unleashed'")
+    function_name = os.environ.get("REDTEAM_FUNCTION_NAME")
+    if not function_name:
+        return _error(500, "REDTEAM_FUNCTION_NAME is not configured")
+    from redteam.runner import _now_id
+
+    run_id = _now_id()
+    payload = {"n": n, "arms": arms, "run_id": run_id, "use_model": bool(body.get("use_model", True))}
+    _lambda_client().invoke(FunctionName=function_name, InvocationType="Event",
+                            Payload=json.dumps(payload).encode("utf-8"))
+    return _response(202, {"run_id": run_id, "n": n, "arms": arms})
+
+
 def _ask(event: dict) -> dict:
     """Forward a human question to the agent Lambda and relay its reply."""
     try:
@@ -126,6 +171,8 @@ ROUTES = {
     "GET /health": _health,
     "GET /audit": _audit,
     "GET /policies": _policies,
+    "GET /redteam": _redteam_get,
+    "POST /redteam": _redteam_post,
     "POST /ask": _ask,
 }
 

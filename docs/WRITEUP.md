@@ -26,6 +26,20 @@ agent to do something dangerous so the denial can be watched in real time, and a
 planted in the instance's own `Name` tag shows that the leash holds even when the attack comes
 from inside the data the agent reads.
 
+## Proving it: the red team
+
+"The model cannot be talked into it" is a claim, so we measure it. An attacker model writes
+attacks across eight tactics (fake authority, fake emergency, fake policy update, role-play,
+obfuscation, instructions hidden in logs and alarm payloads, slow escalation, and plain asking),
+each naming real resources in the account. Every attack runs twice with the same model and the
+same tools: once through the real agent with Cedar on, and once through the same agent with
+authorisation off inside an in-memory sandbox where nothing real can be harmed. The dashboard
+reports how often the model was persuaded to call the destructive tool, how many attacks executed
+a destructive action without the leash, and how many did with Leash. The last figure is the
+project: it stays at zero, and every one of those zeros is a real Verified Permissions denial with
+the policy id that produced it. The numbers from the deployed run are on the live dashboard and
+copied into the README before submission.
+
 ## Where AWS fits
 
 CloudWatch and EventBridge turn an alarm into an event; Lambda runs the agent only while an
@@ -42,6 +56,7 @@ The dashboard computes these from the audit trail itself, not from a slide:
 
 | What changes | Before Leash | With Leash |
 | --- | --- | --- |
+| A destructive action after a jailbreak attempt | depends on the model's mood that night | 0, measured across every tactic; the control arm shows what the same model does unleashed |
 | Time from alarm to fix for a full dev disk | until a human wakes up and runs one command: typically 30 min to several hours | median under 90 s, alarm event to allowed fix, no human involved (shown as **Alarm → fixed** on the dashboard) |
 | Who can destroy something at 3 AM | anyone with the admin keys the bot would need | nobody: terminate and delete are forbidden by policy, by IAM, and by code |
 | How you find out what the bot did | grep CloudTrail | one table: every ALLOW and DENY with the policy id that decided it |
@@ -66,6 +81,10 @@ The dashboard computes these from the audit trail itself, not from a slide:
   agent config so the alarm only needs `InstanceId + path + fstype`.
 - **IAM cannot express "not above 4".** It can deny an API, not a value in the request. That is
   why Cedar is the leash and IAM is the floor, and why both exist.
+- **A guardrail claim needs a control group.** Running the same attacks against the same model
+  with authorisation off, in a sandbox, is what turns "it refused" into a number. It also
+  separates "the model refused" from "the policy refused", which are very different guarantees:
+  only the second one is the same every night.
 - **Build the offline path early.** Our AWS account was stuck in verification on day one, so we
   built `local_demo/`: the same agent, tools and `.cedar` files against an in-memory AWS. It became
   the fastest way to iterate on prompts and the way the tests run in CI.
