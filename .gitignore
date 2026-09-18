@@ -1,0 +1,7 @@
+.aws-sam/
+__pycache__/
+*.pyc
+.env
+node_modules/
+dashboard/config.js
+.pytest_cache/
