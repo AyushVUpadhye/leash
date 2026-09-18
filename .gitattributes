@@ -1,0 +1,9 @@
+# Normalise line endings so the repo behaves the same on Windows and Linux.
+* text=auto
+# tests/authz compares cedar/policies/*.cedar byte-for-byte with the YAML block scalars in
+# cedar/template.yaml, and bash scripts must not carry CR; force LF for these on checkout.
+*.cedar text eol=lf
+*.sh text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.py text eol=lf

@@ -1,0 +1,120 @@
+{
+  "Leash": {
+    "entityTypes": {
+      "Agent": {
+        "shape": {
+          "type": "Record",
+          "attributes": {}
+        }
+      },
+      "Instance": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "env": {
+              "type": "String"
+            }
+          }
+        }
+      },
+      "EcsService": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "env": {
+              "type": "String"
+            }
+          }
+        }
+      },
+      "AutoScalingGroup": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "env": {
+              "type": "String"
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+      "cleanDisk": {
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Instance"
+          ],
+          "context": {
+            "type": "Record",
+            "attributes": {}
+          }
+        }
+      },
+      "restartService": {
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "EcsService"
+          ],
+          "context": {
+            "type": "Record",
+            "attributes": {}
+          }
+        }
+      },
+      "scaleGroup": {
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "AutoScalingGroup"
+          ],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "desiredCapacity": {
+                "type": "Long"
+              }
+            }
+          }
+        }
+      },
+      "terminateInstance": {
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Instance"
+          ],
+          "context": {
+            "type": "Record",
+            "attributes": {}
+          }
+        }
+      },
+      "deleteResource": {
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Instance",
+            "EcsService",
+            "AutoScalingGroup"
+          ],
+          "context": {
+            "type": "Record",
+            "attributes": {}
+          }
+        }
+      }
+    }
+  }
+}

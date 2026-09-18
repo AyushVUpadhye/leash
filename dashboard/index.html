@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leash — audit trail</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1d2026; --line: #2c3038; --text: #e8eaed; --muted: #9aa0a8;
+    --allow: #2ecc71; --deny: #ff5f5f; --accent: #7aa2ff; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 18px 28px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 26px; letter-spacing: 0.5px; }
+  header .tag { color: var(--muted); font-size: 15px; }
+  header .status { margin-left: auto; color: var(--muted); font-size: 14px; font-family: var(--mono); }
+  main { display: grid; grid-template-columns: 1fr 400px; gap: 20px; padding: 20px 28px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  section h2 { margin: 0 0 12px; font-size: 17px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  .banner { display: none; margin: 16px 28px 0; padding: 12px 16px; border-radius: 8px; background: #4a2a10; border: 1px solid #b86b1e; color: #ffd9a8; font-family: var(--mono); }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td.mono { font-family: var(--mono); font-size: 14px; }
+  td.time { white-space: nowrap; color: var(--muted); font-family: var(--mono); font-size: 13px; }
+  tr.deny td { background: rgba(255, 95, 95, 0.06); }
+  .pill { display: inline-block; padding: 3px 12px; border-radius: 999px; font-weight: 700; font-size: 13px; letter-spacing: 1px; }
+  .pill.allow { background: rgba(46, 204, 113, 0.18); color: var(--allow); border: 1px solid var(--allow); }
+  .pill.deny { background: rgba(255, 95, 95, 0.18); color: var(--deny); border: 1px solid var(--deny); }
+  .policy { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 6px; background: #2a2e37; font-family: var(--mono); font-size: 12px; }
+  .empty { color: var(--muted); padding: 24px 10px; text-align: center; }
+  textarea { width: 100%; min-height: 96px; resize: vertical; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  button { margin-top: 10px; padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent); color: #0b1020; font-weight: 700; font-size: 15px; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .examples { margin: 8px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 13px; }
+  .examples li { cursor: pointer; margin: 4px 0; } .examples li:hover { color: var(--text); }
+  .note { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+  #reply { margin-top: 14px; padding: 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); white-space: pre-wrap; font-size: 15px; min-height: 60px; }
+  #reply.err { border-color: var(--deny); color: #ffb3b3; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Leash</h1>
+  <span class="tag">an ops agent on a leash — every action authorised by Cedar</span>
+  <span class="status" id="status">connecting…</span>
+</header>
+<div class="banner" id="banner">dashboard/config.js not generated — run scripts/deploy.sh to write it from the stack's ApiUrl.</div>
+<main>
+  <section>
+    <h2>Audit trail (newest first, refreshes every 10s)</h2>
+    <table>
+      <thead><tr><th>Time (UTC)</th><th>Action</th><th>Resource</th><th>Env</th><th>Decision</th><th>Policies</th><th>Result</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </section>
+  <section>
+    <h2>Ask the agent</h2>
+    <textarea id="message" placeholder="e.g. Terminate instance i-0123456789abcdef0"></textarea>
+    <button id="send">Send to agent</button>
+    <ul class="examples">
+      <li>Terminate the dev web instance</li>
+      <li>Scale leash-dev-asg to 10 instances</li>
+      <li>Restart the prod db server</li>
+      <li>What is the disk usage on the dev web instance? (read-only)</li>
+    </ul>
+    <p class="note">Denials answer in seconds. A cleanup runs up to 90&nbsp;s over SSM and can outlive the
+      30&nbsp;s API timeout; the agent still finishes and its decision still lands in the audit table above.</p>
+    <div id="reply">The agent will diagnose, act only through policy-checked tools, and report what was allowed or denied.</div>
+  </section>
+</main>
+
+<script src="config.js"></script>
+<script>
+  // Lane C's deploy script writes config.js as: window.LEASH_CONFIG = { apiUrl: "https://..." };
+  var cfg = window.LEASH_CONFIG || {};
+  var API = (cfg.apiUrl || "").replace(/\/+$/, "");
+  var $ = function (id) { return document.getElementById(id); };
+
+  if (!API) {
+    $("banner").style.display = "block";
+    $("status").textContent = "no API configured";
+    $("rows").innerHTML = '<tr><td colspan="7" class="empty">No API URL. Deploy the stack first.</td></tr>';
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function fmtTime(iso) {
+    // sk is ISO8601 UTC with microseconds; show date + HH:MM:SS, full value on hover.
+    if (!iso) return "";
+    var m = String(iso).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+    return m ? '<span title="' + esc(iso) + '">' + m[1] + "<br>" + m[2] + "</span>" : esc(iso);
+  }
+
+  function policies(list) {
+    if (!list || !list.length) return '<span class="policy" style="opacity:.5">none</span>';
+    return list.map(function (p) { return '<span class="policy">' + esc(p) + "</span>"; }).join("");
+  }
+
+  function render(items) {
+    if (!items.length) {
+      $("rows").innerHTML = '<tr><td colspan="7" class="empty">No decisions yet. Break something (scripts/break-disk.sh) or ask the agent.</td></tr>';
+      return;
+    }
+    $("rows").innerHTML = items.map(function (it) {
+      var deny = String(it.decision).toUpperCase() === "DENY";
+      var cls = deny ? "deny" : "allow";
+      var resource = esc(it.resource_type) + "<br><small>" + esc(it.resource_id) + "</small>";
+      var result = esc(it.result || "");
+      if (it.reason && deny) result += (result ? "<br>" : "") + "<small>" + esc(it.reason) + "</small>";
+      return '<tr class="' + cls + '">' +
+        '<td class="time">' + fmtTime(it.sk) + "</td>" +
+        '<td class="mono">' + esc(it.action) + "</td>" +
+        '<td class="mono">' + resource + "</td>" +
+        '<td class="mono">' + esc(it.resource_env) + "</td>" +
+        '<td><span class="pill ' + cls + '">' + (deny ? "DENY" : "ALLOW") + "</span></td>" +
+        "<td>" + policies(it.policy_ids) + "</td>" +
+        "<td>" + result + "</td></tr>";
+    }).join("");
+  }
+
+  function refresh() {
+    if (!API) return;
+    fetch(API + "/audit?limit=50")
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (data) {
+        render(data.items || []);
+        $("status").textContent = "live · " + new Date().toISOString().slice(11, 19) + "Z";
+      })
+      .catch(function (e) { $("status").textContent = "audit fetch failed: " + e.message; });
+  }
+
+  function ask() {
+    var msg = $("message").value.trim();
+    if (!msg || !API) return;
+    var btn = $("send"), out = $("reply");
+    btn.disabled = true; out.className = ""; out.textContent = "Thinking… (denials take seconds; a real cleanup may exceed the 30 s API timeout - check the audit table)";
+    fetch(API + "/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: msg }) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok || res.j.error) { out.className = "err"; out.textContent = "Error: " + (res.j.error || "request failed"); }
+        else { out.textContent = res.j.reply || JSON.stringify(res.j, null, 2); }
+        refresh();
+      })
+      .catch(function (e) { out.className = "err"; out.textContent = "Error: " + e.message; })
+      .then(function () { btn.disabled = false; });
+  }
+
+  $("send").addEventListener("click", ask);
+  $("message").addEventListener("keydown", function (e) { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask(); });
+  Array.prototype.forEach.call(document.querySelectorAll(".examples li"), function (li) {
+    li.addEventListener("click", function () { $("message").value = li.textContent; });
+  });
+
+  refresh();
+  setInterval(refresh, 10000);
+</script>
+</body>
+</html>

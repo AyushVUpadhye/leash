@@ -1,0 +1,9 @@
+# Local development and test dependencies (not packaged into any Lambda).
+#   pip install -r requirements-dev.txt
+#   PYTHONPATH=src python -m pytest -q
+pytest
+pyyaml
+cedarpy==4.12.0
+boto3
+strands-agents==1.56.0
+cfn-lint

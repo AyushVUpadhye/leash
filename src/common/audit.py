@@ -1,0 +1,95 @@
+"""Audit trail: one DynamoDB item per authorisation decision, newest-first listing for the dashboard.
+
+Table (root template.yaml): pk = incident_id, sk = ISO8601 UTC timestamp with microseconds,
+GSI "gsi1" on (gsi1pk = "ALL", sk) so a single Query returns everything newest first.
+"""
+
+import os
+from datetime import datetime, timezone
+
+_DDB = None  # cached boto3 client
+
+GSI_NAME = "gsi1"
+GSI_PK = "ALL"
+
+
+def _client():
+    global _DDB
+    if _DDB is None:
+        import boto3
+
+        _DDB = boto3.client("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    return _DDB
+
+
+def _table() -> str:
+    return os.environ["AUDIT_TABLE"]
+
+
+def timestamp() -> str:
+    """ISO8601 UTC with microseconds, e.g. 2026-09-18T03:12:07.123456Z (sorts lexically)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def write_audit(incident_id: str, action: str, resource_type: str, resource_id: str, resource_env: str,
+                decision, result: str, alarm_name: str = "", summary: str = "") -> dict:
+    """PutItem one decision row; returns the plain-dict item that was written."""
+    item = {
+        "pk": incident_id,
+        "sk": timestamp(),
+        "gsi1pk": GSI_PK,
+        "action": action,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "resource_env": resource_env,
+        "decision": "ALLOW" if decision.allowed else "DENY",
+        "policy_ids": list(decision.policy_ids),
+        "reason": decision.reason,
+        "result": result,
+        "alarm_name": alarm_name,
+        "summary": summary,
+    }
+    # Low-level client: attribute values are typed ({"S": ...}, {"L": [...]}).
+    # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/dynamodb/client/put_item.html
+    _client().put_item(TableName=_table(), Item=_serialize(item))
+    return item
+
+
+def list_audit(limit: int = 50) -> list[dict]:
+    """Newest-first decisions via Query on gsi1 (gsi1pk = "ALL", ScanIndexForward=False)."""
+    resp = _client().query(
+        TableName=_table(),
+        IndexName=GSI_NAME,
+        KeyConditionExpression="gsi1pk = :all",
+        ExpressionAttributeValues={":all": {"S": GSI_PK}},
+        ScanIndexForward=False,
+        Limit=max(1, int(limit)),
+    )
+    return [_deserialize(it) for it in resp.get("Items", [])]
+
+
+# --- DynamoDB typed-value helpers (kept explicit; only S and L-of-S are used) --------
+
+
+def _serialize(item: dict) -> dict:
+    out = {}
+    for key, value in item.items():
+        if isinstance(value, list):
+            out[key] = {"L": [{"S": str(v)} for v in value]}
+        else:
+            out[key] = {"S": str(value)}
+    return out
+
+
+def _deserialize(item: dict) -> dict:
+    out = {}
+    for key, typed in item.items():
+        if "S" in typed:
+            out[key] = typed["S"]
+        elif "L" in typed:
+            out[key] = [v.get("S", "") for v in typed["L"]]
+        elif "N" in typed:
+            out[key] = typed["N"]
+        else:
+            out[key] = next(iter(typed.values()), None)
+    return out

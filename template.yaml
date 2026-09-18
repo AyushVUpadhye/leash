@@ -1,0 +1,630 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Leash - an ops agent on a leash. A Strands agent in Lambda receives CloudWatch
+  alarms and runs the fix, but every action is first authorised by Cedar policies
+  in Amazon Verified Permissions. Includes deliberately breakable dev infra for the
+  demo, a prod-tagged instance the agent must be denied on, an audit table, an
+  HTTP API and a static dashboard bucket. Lane C (infra) owns this file.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  BedrockModelId:
+    Type: String
+    # Fallback if Haiku 4.5 access is not enabled in the account: us.amazon.nova-lite-v1:0
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: Bedrock model id (inference profile) the Strands agent uses.
+  AlertEmail:
+    Type: String
+    Description: Email address that receives the SNS incident summaries.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the demo EC2 instances and the Fargate service (default VPC is fine).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet in VpcId (needs an internet route for SSM, ECR and CloudWatch).
+  KeyName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 key pair name. Leave empty for no key (SSM only).
+  DiskFstype:
+    Type: String
+    Default: xfs
+    Description: >-
+      Filesystem type of "/" on the dev instance. AL2023 root is xfs. The CloudWatch
+      agent emits it as the "fstype" dimension, so the alarm has to match it exactly.
+  DiskPath:
+    Type: String
+    Default: /
+    Description: Mount path the CloudWatch agent watches (the "path" dimension).
+  LatestAmiId:
+    # SSM public parameter, always resolves to the newest AL2023 x86_64 AMI in the region.
+    # https://docs.aws.amazon.com/linux/al2023/ug/ec2.html#launch-from-cloudformation
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI, resolved from the public SSM parameter.
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Architectures: [x86_64]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Dependencies layer. Built for Linux/x86_64 by scripts/build-deps.sh (uv with
+  # --python-platform) so `sam build` never runs pip on the developer's OS.
+  # strands-agents pulls a Windows-only dep (pywin32) via mcp, which breaks the
+  # default SAM python builder on Windows without Docker; the layer sidesteps it.
+  # ---------------------------------------------------------------------------
+  DepsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-deps"
+      Description: strands-agents + boto3, prebuilt for python3.11 on x86_64 Linux
+      ContentUri: .build/layer/
+      CompatibleRuntimes: [python3.11]
+      CompatibleArchitectures: [x86_64]
+      RetentionPolicy: Delete
+
+  # -------------------------------------------------------------------------
+  # The leash: Cedar policy store (nested SAM app owned by Lane B).
+  # Outputs PolicyStoreId, consumed by the agent's env and IAM policy.
+  # -------------------------------------------------------------------------
+  Authz:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: cedar/template.yaml
+
+  # -------------------------------------------------------------------------
+  # Audit trail: one item per authorisation decision. GSI "gsi1" (gsi1pk="ALL")
+  # lets the dashboard list everything newest-first with a single Query.
+  # -------------------------------------------------------------------------
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    # Hackathon stack: the audit trail is disposable, teardown must leave nothing behind.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub "${AWS::StackName}-audit"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # -------------------------------------------------------------------------
+  # Human notification: the agent publishes a one-paragraph summary here.
+  # -------------------------------------------------------------------------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-alerts"
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # -------------------------------------------------------------------------
+  # The agent. Cedar (via Verified Permissions) is the leash; the IAM policy
+  # below is the floor - even a bug in the agent cannot delete anything.
+  # -------------------------------------------------------------------------
+  AgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-agent"
+      Description: Strands ops agent; every mutating tool is authorised by Cedar first.
+      CodeUri: src/
+      Layers: [!Ref DepsLayer]
+      Handler: agent.handler.handler
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          POLICY_STORE_ID: !GetAtt Authz.Outputs.PolicyStoreId
+          # JSON {logical policy name: AVP policy id}; authz.py maps the opaque ids AVP
+          # returns in determiningPolicies back to names like "ForbidProd" for the audit row.
+          POLICY_ID_MAP: !GetAtt Authz.Outputs.PolicyIdMap
+          AUDIT_TABLE: !Ref AuditTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          ENV_TAG_KEY: env
+          SCALE_CAP: "4"
+      Events:
+        # EventBridge delivers every "leash-*" alarm that enters ALARM state.
+        # SAM creates the rule and the lambda:InvokeFunction permission for it.
+        # Prefix matching: https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-event-patterns-content-based-filtering.html
+        AlarmStateChange:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: [aws.cloudwatch]
+              detail-type: ["CloudWatch Alarm State Change"]
+              detail:
+                state:
+                  value: [ALARM]
+                alarmName:
+                  - prefix: leash-
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: AskCedar
+              Effect: Allow
+              Action: verifiedpermissions:IsAuthorized
+              Resource: !Sub
+                - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
+                - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+            - Sid: WriteAudit
+              Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:Query]
+              Resource:
+                - !GetAtt AuditTable.Arn
+                - !Sub "${AuditTable.Arn}/index/*"
+            - Sid: Notify
+              Effect: Allow
+              Action: sns:Publish
+              Resource: !Ref AlertTopic
+            - Sid: Bedrock
+              Effect: Allow
+              # "*" because cross-region inference profiles route to foundation models in
+              # several regions, and the profile ARN alone is not enough.
+              # https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+              Resource: "*"
+            - Sid: SsmRunShellScriptDocument
+              Effect: Allow
+              Action: ssm:SendCommand
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+            - Sid: SsmOnlyDevInstances
+              Effect: Allow
+              Action: ssm:SendCommand
+              Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+              # Tag condition: https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-restrict-access-examples.html
+              Condition:
+                StringEquals:
+                  ssm:resourceTag/env: dev
+            - Sid: SsmReadResults
+              Effect: Allow
+              Action: ssm:GetCommandInvocation
+              Resource: "*"
+            - Sid: ReadOnlyDiscovery
+              Effect: Allow
+              Action:
+                - ec2:Describe*
+                - ecs:Describe*
+                - ecs:List*
+                - autoscaling:Describe*
+                - cloudwatch:ListMetrics
+                - cloudwatch:GetMetricData
+                - cloudwatch:GetMetricStatistics
+              Resource: "*"
+            - Sid: RestartDevService
+              Effect: Allow
+              Action: ecs:UpdateService
+              Resource: !Ref EcsService
+            - Sid: ScaleDevGroup
+              Effect: Allow
+              Action: autoscaling:SetDesiredCapacity
+              Resource: !Sub "arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AWS::StackName}-dev-asg"
+            - Sid: NeverDestroy
+              # Explicit Deny wins over any Allow. Cedar should never let these through,
+              # but IAM makes it impossible even if the agent code is wrong.
+              Effect: Deny
+              Action:
+                - ec2:TerminateInstances
+                - ec2:DeleteVolume
+                - ecs:DeleteService
+                - ecs:DeleteCluster
+                - autoscaling:DeleteAutoScalingGroup
+                - dynamodb:DeleteTable
+                - s3:DeleteBucket
+                - rds:Delete*
+              Resource: "*"
+
+  # -------------------------------------------------------------------------
+  # HTTP API + API Lambda: /health, /audit (read table), /ask (invoke agent).
+  # -------------------------------------------------------------------------
+  LeashApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: ["*"]
+        AllowHeaders: ["*"]
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      Description: Thin HTTP front for the dashboard; reads audit, forwards /ask to the agent.
+      CodeUri: src/
+      Layers: [!Ref DepsLayer]
+      Handler: api.handler.handler
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          AUDIT_TABLE: !Ref AuditTable
+          AGENT_FUNCTION_NAME: !Ref AgentFunction
+      Events:
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LeashApi
+            Path: /health
+            Method: GET
+        Audit:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LeashApi
+            Path: /audit
+            Method: GET
+        Ask:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LeashApi
+            Path: /ask
+            Method: POST
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: ReadAudit
+              Effect: Allow
+              Action: dynamodb:Query
+              Resource:
+                - !GetAtt AuditTable.Arn
+                - !Sub "${AuditTable.Arn}/index/*"
+            - Sid: AskAgent
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !GetAtt AgentFunction.Arn
+
+  # -------------------------------------------------------------------------
+  # Dashboard: public static website bucket. scripts/deploy.sh syncs dashboard/
+  # here after writing config.js with the ApiUrl.
+  # -------------------------------------------------------------------------
+  DashboardBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-dashboard-${AWS::AccountId}-${AWS::Region}"
+      # Public website: all four blocks must be off for the bucket policy below to apply.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+  DashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicRead
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${DashboardBucket.Arn}/*"
+
+  # -------------------------------------------------------------------------
+  # Breakable infra (dev) and a prod decoy. Nothing here has inbound access;
+  # the instances are reached through SSM only.
+  # -------------------------------------------------------------------------
+  LeashSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${AWS::StackName}-no-inbound"
+      GroupDescription: No inbound rules. Outbound only (SSM, CloudWatch, ECR).
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-no-inbound"
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy"
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # Dev web box. UserData installs the CloudWatch agent and publishes
+  # disk_used_percent for "/" every 10 s so the disk alarm fires within seconds.
+  DevInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref LeashSecurityGroup]
+      Tags:
+        - Key: Name
+          Value: leash-dev-web
+        - Key: env
+          Value: dev
+      UserData:
+        # Agent config reference: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-Configuration-File-Details.html
+        # drop_device=true removes the "device" dimension and omit_hostname=true the "host"
+        # dimension (published by default), so the alarm only needs InstanceId + path + fstype
+        # and does not care whether root is nvme0n1p1 or xvda1.
+        # "${!aws:InstanceId}" is Fn::Sub escaping for the literal "${aws:InstanceId}".
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y amazon-cloudwatch-agent
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json <<'CWCFG'
+          {
+            "agent": { "metrics_collection_interval": 10, "omit_hostname": true },
+            "metrics": {
+              "namespace": "CWAgent",
+              "append_dimensions": { "InstanceId": "${!aws:InstanceId}" },
+              "metrics_collected": {
+                "disk": {
+                  "measurement": ["used_percent"],
+                  "metrics_collection_interval": 10,
+                  "resources": ["${DiskPath}"],
+                  "drop_device": true
+                }
+              }
+            }
+          }
+          CWCFG
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+            -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+
+  # Prod decoy. CloudFormation cannot create a stopped instance, so
+  # scripts/stop-prod.sh stops it right after deploy. It exists only so the
+  # demo can show a real DENY against a real prod-tagged resource.
+  ProdInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref LeashSecurityGroup]
+      Tags:
+        - Key: Name
+          Value: leash-prod-db
+        - Key: env
+          Value: prod
+
+  # ECS Fargate: one nginx task the demo kills; Container Insights supplies
+  # the RunningTaskCount metric the alarm watches.
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: leash-dev
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: env
+          Value: dev
+  EcsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: /ecs/leash-api-dev
+      RetentionInDays: 7
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: leash-api-dev
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: nginx
+          Image: public.ecr.aws/nginx/nginx:latest
+          Essential: true
+          PortMappings:
+            - ContainerPort: 80
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: nginx
+  EcsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: leash-api-dev
+      Cluster: !Ref EcsCluster
+      LaunchType: FARGATE
+      DesiredCount: 1
+      TaskDefinition: !Ref EcsTaskDefinition
+      PropagateTags: SERVICE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetId]
+          SecurityGroups: [!Ref LeashSecurityGroup]
+      Tags:
+        - Key: env
+          Value: dev
+
+  # Auto Scaling group at desired 0: costs nothing at rest, max 6 so the
+  # Cedar cap of 4 is a real boundary the agent can be asked to cross.
+  DevLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-dev-asg"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: t3.micro
+        KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            Groups: [!Ref LeashSecurityGroup]
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: env
+                Value: dev
+              - Key: Name
+                Value: leash-dev-asg-node
+  DevAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${AWS::StackName}-dev-asg"
+      MinSize: "0"
+      DesiredCapacity: "0"
+      MaxSize: "6"
+      VPCZoneIdentifier: [!Ref SubnetId]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref DevLaunchTemplate
+        Version: !GetAtt DevLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: env
+          Value: dev
+          PropagateAtLaunch: true
+        - Key: Name
+          Value: leash-dev-asg
+          PropagateAtLaunch: true
+
+  # -------------------------------------------------------------------------
+  # Alarms. Names start with "leash-" so the EventBridge rule picks them up.
+  # -------------------------------------------------------------------------
+  # Alarms cannot use SEARCH() expressions, so the dimension set must match the
+  # agent exactly: InstanceId + path + fstype (device dropped via drop_device).
+  # Period 10 works because the agent publishes at 10 s (high-resolution).
+  DiskAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: leash-disk-dev
+      AlarmDescription: Root filesystem on leash-dev-web above 85 percent.
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref DevInstance
+        - Name: path
+          Value: !Ref DiskPath
+        - Name: fstype
+          Value: !Ref DiskFstype
+      Statistic: Maximum
+      Period: 10
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+  EcsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: leash-ecs-dev
+      AlarmDescription: leash-api-dev has fewer than 1 running task.
+      Namespace: ECS/ContainerInsights
+      MetricName: RunningTaskCount
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsCluster
+        - Name: ServiceName
+          Value: !GetAtt EcsService.Name
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+
+# ---------------------------------------------------------------------------
+# Outputs (scripts/*.sh read these with `aws cloudformation describe-stacks`)
+# ---------------------------------------------------------------------------
+Outputs:
+  ApiUrl:
+    Description: Base URL of the HTTP API ($default stage).
+    Value: !Sub "https://${LeashApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+  DashboardUrl:
+    Description: Public static website URL of the dashboard.
+    Value: !GetAtt DashboardBucket.WebsiteURL
+  DashboardBucket:
+    Value: !Ref DashboardBucket
+  AuditTableName:
+    Value: !Ref AuditTable
+  PolicyStoreId:
+    Value: !GetAtt Authz.Outputs.PolicyStoreId
+  DevInstanceId:
+    Value: !Ref DevInstance
+  ProdInstanceId:
+    Value: !Ref ProdInstance
+  EcsClusterName:
+    Value: !Ref EcsCluster
+  EcsServiceName:
+    Value: !GetAtt EcsService.Name
+  AsgName:
+    Value: !Ref DevAutoScalingGroup
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  AgentFunctionName:
+    Value: !Ref AgentFunction

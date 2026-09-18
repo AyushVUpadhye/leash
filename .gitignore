@@ -5,3 +5,4 @@ __pycache__/
 node_modules/
 dashboard/config.js
 .pytest_cache/
+.build/

@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Leash authorisation (Lane B): the Amazon Verified Permissions policy store that
+  holds the Cedar schema and the four policies every agent action is checked
+  against. Included by the root template as nested application "Authz".
+  cedar/policies/*.cedar are the same statements as the inline text below;
+  tests/authz/test_authz_contract.py fails if they ever differ.
+
+Resources:
+  # Resource reference:
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-verifiedpermissions-policystore.html
+  # STRICT validation makes the store reject any policy that does not type-check
+  # against the schema, so a typo in an action name cannot silently widen the leash.
+  # The schema string is cedar/schema.json minified; the test asserts they are equal.
+  PolicyStore:
+    Type: AWS::VerifiedPermissions::PolicyStore
+    Properties:
+      Description: Leash - Cedar policies that authorise every agent action.
+      ValidationSettings:
+        Mode: STRICT
+      Schema:
+        CedarJson: '{"Leash":{"entityTypes":{"Agent":{"shape":{"type":"Record","attributes":{}}},"Instance":{"shape":{"type":"Record","attributes":{"env":{"type":"String"}}}},"EcsService":{"shape":{"type":"Record","attributes":{"env":{"type":"String"}}}},"AutoScalingGroup":{"shape":{"type":"Record","attributes":{"env":{"type":"String"}}}}},"actions":{"cleanDisk":{"appliesTo":{"principalTypes":["Agent"],"resourceTypes":["Instance"],"context":{"type":"Record","attributes":{}}}},"restartService":{"appliesTo":{"principalTypes":["Agent"],"resourceTypes":["EcsService"],"context":{"type":"Record","attributes":{}}}},"scaleGroup":{"appliesTo":{"principalTypes":["Agent"],"resourceTypes":["AutoScalingGroup"],"context":{"type":"Record","attributes":{"desiredCapacity":{"type":"Long"}}}}},"terminateInstance":{"appliesTo":{"principalTypes":["Agent"],"resourceTypes":["Instance"],"context":{"type":"Record","attributes":{}}}},"deleteResource":{"appliesTo":{"principalTypes":["Agent"],"resourceTypes":["Instance","EcsService","AutoScalingGroup"],"context":{"type":"Record","attributes":{}}}}}}}'
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-verifiedpermissions-policy.html
+  # Logical ids double as the human-readable policy names in the audit trail:
+  # Verified Permissions returns opaque policy ids, and PolicyIdMap (below) lets
+  # src/common/authz.py translate them back to these names.
+
+  PermitDevRemediation:
+    Type: AWS::VerifiedPermissions::Policy
+    Properties:
+      PolicyStoreId: !Ref PolicyStore
+      Definition:
+        Static:
+          Description: Allow the agent to clean disks, restart services and scale groups on env=dev resources.
+          Statement: |
+            permit (
+                principal == Leash::Agent::"leash",
+                action in [Leash::Action::"cleanDisk", Leash::Action::"restartService", Leash::Action::"scaleGroup"],
+                resource
+            ) when { resource.env == "dev" };
+
+  ForbidDestructive:
+    Type: AWS::VerifiedPermissions::Policy
+    Properties:
+      PolicyStoreId: !Ref PolicyStore
+      Definition:
+        Static:
+          Description: Nobody may terminate or delete anything, whatever the environment.
+          Statement: |
+            forbid (
+                principal,
+                action in [Leash::Action::"terminateInstance", Leash::Action::"deleteResource"],
+                resource
+            );
+
+  ForbidProd:
+    Type: AWS::VerifiedPermissions::Policy
+    Properties:
+      PolicyStoreId: !Ref PolicyStore
+      Definition:
+        Static:
+          Description: No action of any kind on a resource tagged env=prod.
+          Statement: |
+            forbid (principal, action, resource) when { resource.env == "prod" };
+
+  ForbidScaleAboveCap:
+    Type: AWS::VerifiedPermissions::Policy
+    Properties:
+      PolicyStoreId: !Ref PolicyStore
+      Definition:
+        Static:
+          Description: scaleGroup is refused when the requested desiredCapacity exceeds 4.
+          Statement: |
+            forbid (
+                principal,
+                action == Leash::Action::"scaleGroup",
+                resource
+            ) when { context.desiredCapacity > 4 };
+
+Outputs:
+  PolicyStoreId:
+    Description: Id of the Verified Permissions policy store (the leash).
+    Value: !Ref PolicyStore
+  PolicyIdMap:
+    Description: JSON object mapping each logical policy name to its Verified Permissions policy id.
+    Value: !Sub '{"PermitDevRemediation":"${PermitDevRemediation}","ForbidDestructive":"${ForbidDestructive}","ForbidProd":"${ForbidProd}","ForbidScaleAboveCap":"${ForbidScaleAboveCap}"}'

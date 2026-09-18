@@ -1,0 +1,26 @@
+# SAM CLI configuration for the Leash stack.
+# https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-config.html
+# First deploy: scripts/deploy.sh runs `sam deploy --guided`, which fills in the
+# parameter_overrides (AlertEmail, VpcId, SubnetId, ...) below.
+version = 0.1
+
+[default.global.parameters]
+stack_name = "leash"
+region = "us-east-1"
+
+[default.build.parameters]
+parallel = true
+
+[default.validate.parameters]
+lint = true
+
+[default.deploy.parameters]
+stack_name = "leash"
+region = "us-east-1"
+# CAPABILITY_AUTO_EXPAND is required because cedar/template.yaml is a nested
+# AWS::Serverless::Application.
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+resolve_s3 = true
+confirm_changeset = false
+fail_on_empty_changeset = false
+disable_rollback = false
