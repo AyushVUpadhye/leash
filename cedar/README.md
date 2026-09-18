@@ -24,6 +24,10 @@ validates the policies against the schema with cedarpy.
 policy ids; `POLICY_ID_MAP` (from the `PolicyIdMap` output) translates them back to the names
 above so the audit row and the agent's reply say `DENIED by ForbidProd`.
 
+`list_policies()` in the same module returns every policy with its statement text, from the store
+in the cloud (`ListPolicies` + `GetPolicy`) or from these files locally; `GET /policies` and the
+dashboard's "The leash" panel are built on it.
+
 Set `LEASH_LOCAL_AUTHZ=1` to evaluate the same request locally with
 [cedarpy](https://pypi.org/project/cedarpy/) against these files instead of calling AWS. That is
 what the tests do; it is not used in Lambda.

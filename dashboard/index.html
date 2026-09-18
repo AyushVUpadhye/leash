@@ -7,30 +7,59 @@
 <style>
   :root {
     --bg: #14161a; --panel: #1d2026; --line: #2c3038; --text: #e8eaed; --muted: #9aa0a8;
-    --allow: #2ecc71; --deny: #ff5f5f; --accent: #7aa2ff; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --allow: #2ecc71; --deny: #ff5f5f; --accent: #7aa2ff; --warn: #ffb454;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: baseline; gap: 16px; padding: 18px 28px; border-bottom: 1px solid var(--line); }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 18px 28px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header h1 { margin: 0; font-size: 26px; letter-spacing: 0.5px; }
   header .tag { color: var(--muted); font-size: 15px; }
   header .status { margin-left: auto; color: var(--muted); font-size: 14px; font-family: var(--mono); }
-  main { display: grid; grid-template-columns: 1fr 400px; gap: 20px; padding: 20px 28px; }
-  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
-  section h2 { margin: 0 0 12px; font-size: 17px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
   .banner { display: none; margin: 16px 28px 0; padding: 12px 16px; border-radius: 8px; background: #4a2a10; border: 1px solid #b86b1e; color: #ffd9a8; font-family: var(--mono); }
+
+  /* stat tiles: the numbers a judge should walk away with */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 20px 28px 0; }
+  @media (max-width: 800px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat .value { font-size: 30px; font-weight: 700; font-family: var(--mono); margin-top: 2px; line-height: 1.1; }
+  .stat .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .stat.allow .value { color: var(--allow); } .stat.deny .value { color: var(--deny); } .stat.time .value { color: var(--accent); }
+
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 20px; padding: 20px 28px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  section h2 { margin: 0 0 12px; font-size: 15px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  section h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 8px; }
+
+  .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.result { font-size: 13px; color: #cfd3da; max-width: 340px; overflow-wrap: anywhere; }
   th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
   td.mono { font-family: var(--mono); font-size: 14px; }
   td.time { white-space: nowrap; color: var(--muted); font-family: var(--mono); font-size: 13px; }
   tr.deny td { background: rgba(255, 95, 95, 0.06); }
+  tr.incident-head td { background: rgba(122, 162, 255, 0.06); color: var(--muted); font-size: 12px; font-family: var(--mono); padding: 5px 10px; }
   .pill { display: inline-block; padding: 3px 12px; border-radius: 999px; font-weight: 700; font-size: 13px; letter-spacing: 1px; }
   .pill.allow { background: rgba(46, 204, 113, 0.18); color: var(--allow); border: 1px solid var(--allow); }
   .pill.deny { background: rgba(255, 95, 95, 0.18); color: var(--deny); border: 1px solid var(--deny); }
-  .policy { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 6px; background: #2a2e37; font-family: var(--mono); font-size: 12px; }
+  .policy { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 6px; background: #2a2e37; font-family: var(--mono); font-size: 12px; cursor: pointer; border: 1px solid transparent; }
+  .policy:hover { border-color: var(--accent); }
   .empty { color: var(--muted); padding: 24px 10px; text-align: center; }
+
+  /* the leash: the policies, verbatim, from the store that enforces them */
+  .cedar { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--bg); transition: box-shadow .2s, border-color .2s; }
+  .cedar.permit { border-left: 3px solid var(--allow); } .cedar.forbid { border-left: 3px solid var(--deny); }
+  .cedar.flash { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122, 162, 255, 0.35); }
+  .cedar .head { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 13px; }
+  .cedar .effect { font-size: 11px; font-weight: 700; letter-spacing: 1px; padding: 1px 7px; border-radius: 999px; }
+  .cedar.permit .effect { color: var(--allow); border: 1px solid var(--allow); } .cedar.forbid .effect { color: var(--deny); border: 1px solid var(--deny); }
+  .cedar .desc { color: var(--muted); font-size: 12px; margin: 4px 0 6px; }
+  .cedar pre { margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; line-height: 1.4; color: #cfd3da; }
+
   textarea { width: 100%; min-height: 96px; resize: vertical; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
   button { margin-top: 10px; padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent); color: #0b1020; font-weight: 700; font-size: 15px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: wait; }
@@ -48,34 +77,50 @@
   <span class="status" id="status">connecting…</span>
 </header>
 <div class="banner" id="banner">dashboard/config.js not generated — run scripts/deploy.sh to write it from the stack's ApiUrl.</div>
+
+<div class="stats">
+  <div class="stat allow"><div class="label">Allowed</div><div class="value" id="n-allow">–</div><div class="sub">actions Cedar permitted</div></div>
+  <div class="stat deny"><div class="label">Denied</div><div class="value" id="n-deny">–</div><div class="sub">actions Cedar refused</div></div>
+  <div class="stat"><div class="label">Incidents</div><div class="value" id="n-incidents">–</div><div class="sub" id="n-incidents-sub">alarms + human requests</div></div>
+  <div class="stat time"><div class="label">Alarm → fixed</div><div class="value" id="n-ttf">–</div><div class="sub" id="n-ttf-sub">median, alarm event to allowed fix</div></div>
+</div>
+
 <main>
-  <section>
-    <h2>Audit trail (newest first, refreshes every 10s)</h2>
-    <table>
-      <thead><tr><th>Time (UTC)</th><th>Action</th><th>Resource</th><th>Env</th><th>Decision</th><th>Policies</th><th>Result</th></tr></thead>
-      <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
-    </table>
-  </section>
-  <section>
-    <h2>Ask the agent</h2>
-    <textarea id="message" placeholder="Ask the agent to do something"></textarea>
-    <button id="send">Send to agent</button>
-    <!-- filled by script from LEASH_CONFIG so the prompts carry the deployment's real ids -->
-    <ul class="examples" id="examples">
-    </ul>
-    <p class="note">Denials answer in seconds. A cleanup runs up to 90&nbsp;s over SSM and can outlive the
-      30&nbsp;s API timeout; the agent still finishes and its decision still lands in the audit table above.</p>
-    <div id="reply">The agent will diagnose, act only through policy-checked tools, and report what was allowed or denied.</div>
-  </section>
+  <div class="col">
+    <section>
+      <h2>Audit trail <small>newest first · refreshes every 10 s</small></h2>
+      <div class="scroll">
+      <table>
+        <thead><tr><th>Time (UTC)</th><th>Action</th><th>Resource</th><th>Env</th><th>Decision</th><th>Policies</th><th>Result</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+      </div>
+    </section>
+  </div>
+  <div class="col">
+    <section>
+      <h2>The leash <small id="leash-src">read live from the policy store</small></h2>
+      <div id="policies"><div class="empty">Loading policies…</div></div>
+      <p class="note">Cedar is deny-by-default and any <b>forbid</b> beats every <b>permit</b>. Click a policy id in the audit trail to jump to the rule that decided it.</p>
+    </section>
+    <section>
+      <h2>Ask the agent</h2>
+      <textarea id="message" placeholder="Ask the agent to do something"></textarea>
+      <button id="send">Send to agent</button>
+      <!-- filled by script from LEASH_CONFIG so the prompts carry the deployment's real ids -->
+      <ul class="examples" id="examples"></ul>
+      <p class="note">Denials answer in seconds. A cleanup runs up to 90&nbsp;s over SSM and can outlive the
+        30&nbsp;s API timeout; the agent still finishes and its decision still lands in the audit table.</p>
+      <div id="reply">The agent will diagnose, act only through policy-checked tools, and report what was allowed or denied.</div>
+    </section>
+  </div>
 </main>
 
 <script src="config.js"></script>
 <script>
-  // Lane C's deploy script writes config.js as: window.LEASH_CONFIG = { apiUrl: "https://..." };
+  // scripts/deploy.sh writes config.js from the stack outputs; local_demo/server.py writes the
+  // fake-world ids. The agent has no "list instances" tool, so example prompts carry real ids.
   var cfg = window.LEASH_CONFIG || {};
-  // Example prompts carry the deployment's real resource ids (deploy.sh writes them from the
-  // stack outputs; local_demo/server.py writes the fake-world ids). The agent has no
-  // "list instances" tool, so a prompt without an id gives the model nothing to act on.
   var ids = {
     dev: cfg.devInstanceId || "<dev-instance-id>",
     prod: cfg.prodInstanceId || "<prod-instance-id>",
@@ -87,17 +132,19 @@
     "The prod db instance " + ids.prod + " looks full, can you clean it up?",
     "What is the disk usage on instance " + ids.dev + "? (read-only)"
   ];
+  var API = (cfg.apiUrl || "").replace(/\/+$/, "");
+  var $ = function (id) { return document.getElementById(id); };
+
   (function () {
-    var ul = document.getElementById("examples");
+    var ul = $("examples");
     EXAMPLES.forEach(function (text) {
       var li = document.createElement("li");
       li.textContent = text;
+      li.addEventListener("click", function () { $("message").value = text; });
       ul.appendChild(li);
     });
-    document.getElementById("message").placeholder = "e.g. " + EXAMPLES[0];
+    $("message").placeholder = "e.g. " + EXAMPLES[0];
   })();
-  var API = (cfg.apiUrl || "").replace(/\/+$/, "");
-  var $ = function (id) { return document.getElementById(id); };
 
   if (!API) {
     $("banner").style.display = "block";
@@ -118,9 +165,54 @@
     return m ? '<span title="' + esc(iso) + '">' + m[1] + "<br>" + m[2] + "</span>" : esc(iso);
   }
 
+  // --- timing: incident ids end in the handler's start time (…-20260918T031207Z); each audit
+  // row's sk is when the decision landed. ALLOW rows on alarm incidents give "alarm -> fixed".
+  function parseIncidentStart(pk) {
+    var m = String(pk || "").match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+  }
+  function parseSk(sk) {
+    var m = String(sk || "").match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z?$/);
+    if (!m) return null;
+    var ms = m[7] ? Math.round(parseInt((m[7] + "000").slice(0, 3), 10)) : 0;
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], ms);
+  }
+  function median(xs) {
+    if (!xs.length) return null;
+    var s = xs.slice().sort(function (a, b) { return a - b; });
+    var mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  }
+  function fmtSeconds(sec) {
+    if (sec == null) return "–";
+    if (sec < 60) return Math.round(sec) + " s";
+    return Math.floor(sec / 60) + " m " + Math.round(sec % 60) + " s";
+  }
+
+  function stats(items) {
+    var allow = 0, deny = 0, incidents = {}, alarms = 0, fixes = [];
+    items.forEach(function (it) {
+      var isDeny = String(it.decision).toUpperCase() === "DENY";
+      if (isDeny) deny++; else allow++;
+      if (!incidents[it.pk]) { incidents[it.pk] = true; if (it.alarm_name) alarms++; }
+      if (!isDeny && it.alarm_name) {
+        var start = parseIncidentStart(it.pk), end = parseSk(it.sk);
+        if (start != null && end != null && end >= start) fixes.push((end - start) / 1000);
+      }
+    });
+    var n = Object.keys(incidents).length;
+    $("n-allow").textContent = allow;
+    $("n-deny").textContent = deny;
+    $("n-incidents").textContent = n;
+    $("n-incidents-sub").textContent = alarms + " from alarms · " + (n - alarms) + " from humans";
+    var med = median(fixes);
+    $("n-ttf").textContent = fmtSeconds(med);
+    $("n-ttf-sub").textContent = med == null ? "no auto-fixed alarm yet" : "median over " + fixes.length + " auto-fixed alarm" + (fixes.length === 1 ? "" : "s") + " · no human involved";
+  }
+
   function policies(list) {
     if (!list || !list.length) return '<span class="policy" style="opacity:.5">none</span>';
-    return list.map(function (p) { return '<span class="policy">' + esc(p) + "</span>"; }).join("");
+    return list.map(function (p) { return '<span class="policy" data-policy="' + esc(p) + '">' + esc(p) + "</span>"; }).join("");
   }
 
   function render(items) {
@@ -128,32 +220,75 @@
       $("rows").innerHTML = '<tr><td colspan="7" class="empty">No decisions yet. Break something (scripts/break-disk.sh) or ask the agent.</td></tr>';
       return;
     }
-    $("rows").innerHTML = items.map(function (it) {
+    var lastPk = null, html = "";
+    items.forEach(function (it) {
+      if (it.pk !== lastPk) {
+        lastPk = it.pk;
+        var kind = it.alarm_name ? "alarm " + esc(it.alarm_name) : "human request";
+        html += '<tr class="incident-head"><td colspan="7">incident ' + esc(it.pk) + " · " + kind + "</td></tr>";
+      }
       var deny = String(it.decision).toUpperCase() === "DENY";
       var cls = deny ? "deny" : "allow";
       var resource = esc(it.resource_type) + "<br><small>" + esc(it.resource_id) + "</small>";
-      var result = esc(it.result || "");
-      if (it.reason && deny) result += (result ? "<br>" : "") + "<small>" + esc(it.reason) + "</small>";
-      return '<tr class="' + cls + '">' +
+      // SSM output can be several hundred characters; show the tail (the before/after line) and
+      // keep the whole thing on hover.
+      var full = String(it.result || "");
+      var shown = full.length > 160 ? "…" + full.slice(-160) : full;
+      var result = '<span title="' + esc(full) + '">' + esc(shown) + "</span>";
+      if (it.reason && deny) result += (full ? "<br>" : "") + "<small>" + esc(it.reason) + "</small>";
+      html += '<tr class="' + cls + '">' +
         '<td class="time">' + fmtTime(it.sk) + "</td>" +
         '<td class="mono">' + esc(it.action) + "</td>" +
         '<td class="mono">' + resource + "</td>" +
         '<td class="mono">' + esc(it.resource_env) + "</td>" +
         '<td><span class="pill ' + cls + '">' + (deny ? "DENY" : "ALLOW") + "</span></td>" +
         "<td>" + policies(it.policy_ids) + "</td>" +
-        "<td>" + result + "</td></tr>";
+        '<td class="result">' + result + "</td></tr>";
+    });
+    $("rows").innerHTML = html;
+  }
+
+  function renderPolicies(items) {
+    if (!items.length) { $("policies").innerHTML = '<div class="empty">No policies returned.</div>'; return; }
+    $("policies").innerHTML = items.map(function (p) {
+      return '<div class="cedar ' + esc(p.effect) + '" id="policy-' + esc(p.id) + '">' +
+        '<div class="head"><span class="effect">' + esc(String(p.effect).toUpperCase()) + "</span><b>" + esc(p.id) + "</b></div>" +
+        (p.description ? '<div class="desc">' + esc(p.description) + "</div>" : "") +
+        "<pre>" + esc(p.statement) + "</pre></div>";
     }).join("");
   }
 
+  function jumpToPolicy(name) {
+    var el = $("policy-" + name);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("flash");
+    setTimeout(function () { el.classList.remove("flash"); }, 1600);
+  }
+  document.addEventListener("click", function (e) {
+    var chip = e.target.closest && e.target.closest(".policy[data-policy]");
+    if (chip) jumpToPolicy(chip.getAttribute("data-policy"));
+  });
+
   function refresh() {
     if (!API) return;
-    fetch(API + "/audit?limit=50")
+    fetch(API + "/audit?limit=200")
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (data) {
-        render(data.items || []);
+        var items = data.items || [];
+        stats(items);
+        render(items);
         $("status").textContent = "live · " + new Date().toISOString().slice(11, 19) + "Z";
       })
       .catch(function (e) { $("status").textContent = "audit fetch failed: " + e.message; });
+  }
+
+  function loadPolicies() {
+    if (!API) return;
+    fetch(API + "/policies")
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (data) { renderPolicies(data.items || []); })
+      .catch(function (e) { $("policies").innerHTML = '<div class="empty">policies fetch failed: ' + esc(e.message) + "</div>"; });
   }
 
   function ask() {
@@ -174,10 +309,8 @@
 
   $("send").addEventListener("click", ask);
   $("message").addEventListener("keydown", function (e) { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask(); });
-  Array.prototype.forEach.call(document.querySelectorAll(".examples li"), function (li) {
-    li.addEventListener("click", function () { $("message").value = li.textContent; });
-  });
 
+  loadPolicies();
   refresh();
   setInterval(refresh, 10000);
 </script>

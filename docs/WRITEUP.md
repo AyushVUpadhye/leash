@@ -20,8 +20,11 @@ policies: remediation is permitted only on resources tagged `env=dev`; terminate
 forbidden for everyone; anything tagged `env=prod` is forbidden; and scaling above four instances
 is forbidden. Cedar is deny-by-default and forbid beats permit, so no prompt can widen the leash.
 Each decision — ALLOW or DENY, with the policy ids that fired — is written to a DynamoDB audit
-table, a summary goes out over SNS, and a small dashboard shows the trail live. A `/ask` endpoint
-lets a human ask the agent to do something dangerous so the denial can be watched in real time.
+table, a summary goes out over SNS, and a small dashboard shows the trail live next to the
+policies themselves, read straight from the policy store. A `/ask` endpoint lets a human ask the
+agent to do something dangerous so the denial can be watched in real time, and a prompt injection
+planted in the instance's own `Name` tag shows that the leash holds even when the attack comes
+from inside the data the agent reads.
 
 ## Where AWS fits
 
@@ -32,6 +35,40 @@ open ports; ECS on Fargate and Auto Scaling are the things being fixed; DynamoDB
 Gateway and S3 give the audit trail somewhere to live. IAM sits underneath Cedar as a second,
 independent floor with explicit denies on every destructive API. One SAM template deploys all of
 it, including the deliberately breakable infrastructure, and one script tears it down.
+
+## Impact, measured
+
+The dashboard computes these from the audit trail itself, not from a slide:
+
+| What changes | Before Leash | With Leash |
+| --- | --- | --- |
+| Time from alarm to fix for a full dev disk | until a human wakes up and runs one command: typically 30 min to several hours | median under 90 s, alarm event to allowed fix, no human involved (shown as **Alarm → fixed** on the dashboard) |
+| Who can destroy something at 3 AM | anyone with the admin keys the bot would need | nobody: terminate and delete are forbidden by policy, by IAM, and by code |
+| How you find out what the bot did | grep CloudTrail | one table: every ALLOW and DENY with the policy id that decided it |
+| How you change what the bot may do | edit a prompt and hope | edit a five-line Cedar policy; the model never sees it |
+| Cost at rest | — | two `t3.micro` (one stopped) and a quarter Fargate vCPU; everything else is pay-per-use |
+
+## What we learned
+
+- **Put the guardrail outside the model.** Our first attempt told the model the rules in the
+  system prompt. A small local model happily "refused" on its own, or narrated a tool call as text,
+  and nothing was audited either way. Moving every check into the tool (`authorize()` before
+  `act()`) and telling the model *not* to enforce policy itself made the behaviour identical across
+  Bedrock Haiku and a 3B Llama. The value is in the policies, not in the model.
+- **Cedar's `forbid`-beats-`permit` is the whole trick.** A policy like
+  `forbid (principal, action, resource) when { resource.env == "prod" }` cannot be argued with;
+  the worst a persuaded model can do is ask, be denied, and leave a red row.
+- **Verified Permissions returns opaque policy ids.** The audit row would have said
+  `SPEXAMPLEabc...`; we export a name-to-id map from the nested SAM stack and translate it back, so
+  the row and the reply say `ForbidProd`.
+- **CloudWatch alarm dimensions must match the agent's metric exactly.** `disk_used_percent` from
+  the CloudWatch agent carries `device` and `host` dimensions by default; we drop them in the
+  agent config so the alarm only needs `InstanceId + path + fstype`.
+- **IAM cannot express "not above 4".** It can deny an API, not a value in the request. That is
+  why Cedar is the leash and IAM is the floor, and why both exist.
+- **Build the offline path early.** Our AWS account was stuck in verification on day one, so we
+  built `local_demo/`: the same agent, tools and `.cedar` files against an in-memory AWS. It became
+  the fastest way to iterate on prompts and the way the tests run in CI.
 
 ## Two ways to run it
 
@@ -45,6 +82,6 @@ in the demo, allowed or denied, comes from a real Cedar decision on the real pol
 
 ## AI tools used
 
-Claude Code (Claude Fable 5.1) was used to scaffold and review the code. All architecture
-decisions, the policy design and the demo were made by the team; every generated file was read and
-tested locally before being kept.
+Claude Code was used to scaffold and review the code. All architecture decisions, the policy
+design and the demo were made by the team; every generated file was read and tested locally
+before being kept.

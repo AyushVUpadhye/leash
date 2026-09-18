@@ -124,6 +124,21 @@ _INSTANCE_ID = re.compile(r"\bi-[0-9a-f]{8,17}\b")
 
 MUTATING_TOOLS = {"clean_disk", "restart_service", "scale_group", "terminate_instance"}
 
+# Words that mean "change something". A request that matches must end in a mutating tool call
+# (so Cedar decides and the decision is audited); a plain question ("what is the disk usage?")
+# must not be nudged into one - that would turn a read-only question into a real cleanup.
+_CHANGE_INTENT = re.compile(
+    r"\b(terminat\w*|delet\w*|destroy\w*|kill\w*|clean\w*|free up|wipe\w*|purge\w*|"
+    r"restart\w*|redeploy\w*|reboot\w*|bounce\w*|recycle\w*|roll\w*|"
+    r"scal\w*|resiz\w*|grow\w*|shrink\w*|add \d+|remove\w*|stop\w*|shut\w*|fix\w*|remediat\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def wants_change(message: str) -> bool:
+    """True if the human is asking the agent to act on a resource rather than asking a question."""
+    return bool(_CHANGE_INTENT.search(message or ""))
+
 
 def _tools_used(agent) -> set[str]:
     """Names of every tool called in this run, from toolUse blocks (strands.types.content.ContentBlock)."""
@@ -205,7 +220,8 @@ def handler(event, context):
 
     try:
         agent = _get_agent(incident_id)
-        reply = _run_agent(agent, prompt, parsed["message"], require_mutation=(parsed["mode"] == "chat"))
+        require_mutation = parsed["mode"] == "chat" and wants_change(parsed["message"])
+        reply = _run_agent(agent, prompt, parsed["message"], require_mutation=require_mutation)
     except Exception as exc:
         log.exception("agent run failed")
         reply = f"agent error: {exc}"

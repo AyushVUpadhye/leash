@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests + template lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Unit tests (real Cedar evaluation via cedarpy, every boto3 client faked)
+        run: python -m pytest -q
+        env:
+          PYTHONPATH: src
+
+      - name: Lint both CloudFormation templates
+        run: cfn-lint template.yaml cedar/template.yaml
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: sam validate
+        run: |
+          sam validate --lint --region us-east-1
+          sam validate --lint --region us-east-1 --template cedar/template.yaml

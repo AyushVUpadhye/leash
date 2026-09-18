@@ -4,6 +4,7 @@ Serves three HTTP API (payload format v2) routes behind API Gateway:
 
     GET  /health        -> {"ok": true}
     GET  /audit?limit=N -> {"items": [...]}   (newest first, via common.audit.list_audit)
+    GET  /policies      -> {"items": [...]}   (the Cedar policies, via common.authz.list_policies)
     POST /ask           -> invokes the agent Lambda synchronously with
                            {"mode": "chat", "message": ...} and returns its JSON reply.
 
@@ -78,6 +79,14 @@ def _audit(event: dict) -> dict:
     return _response(200, {"items": list_audit(limit=limit)})
 
 
+def _policies(event: dict) -> dict:
+    """The leash itself: every Cedar policy with its text, read from the same backend that
+    enforces it (Verified Permissions in the cloud, the .cedar files in the local demo)."""
+    from common.authz import list_policies
+
+    return _response(200, {"items": list_policies()})
+
+
 def _ask(event: dict) -> dict:
     """Forward a human question to the agent Lambda and relay its reply."""
     try:
@@ -116,6 +125,7 @@ def _ask(event: dict) -> dict:
 ROUTES = {
     "GET /health": _health,
     "GET /audit": _audit,
+    "GET /policies": _policies,
     "POST /ask": _ask,
 }
 

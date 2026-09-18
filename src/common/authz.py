@@ -152,6 +152,48 @@ def _authorize_local(action, resource_type, resource_id, resource_env, context) 
                     errors=list(result.diagnostics.errors))
 
 
+# --- the leash, readable ---------------------------------------------------------------
+
+
+def list_policies() -> list[dict]:
+    """Every policy in the store as [{"id", "effect", "description", "statement"}], in POLICY_NAMES
+    order, so the dashboard can show the leash next to the audit trail.
+
+    Same switch as authorize(): LEASH_LOCAL_AUTHZ=1 reads cedar/policies/*.cedar, otherwise the
+    text comes from Verified Permissions itself (ListPolicies + GetPolicy), so what is shown is
+    what is enforced. Failures raise; the API turns them into a 500 with the message.
+    """
+    if os.environ.get("LEASH_LOCAL_AUTHZ") == "1":
+        base = cedar_dir()
+        out = []
+        for name in POLICY_NAMES:
+            text = (base / "policies" / f"{name}.cedar").read_text(encoding="utf-8")
+            out.append(_policy_row(name, text, ""))
+        return out
+    return _list_policies_avp()
+
+
+def _policy_row(name: str, statement: str, description: str) -> dict:
+    return {"id": name, "effect": "forbid" if statement.lstrip().startswith("forbid") else "permit",
+            "description": description, "statement": statement.strip()}
+
+
+def _list_policies_avp() -> list[dict]:
+    # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/verifiedpermissions/client/list_policies.html
+    store = os.environ["POLICY_STORE_ID"]
+    names = _policy_names()
+    rows = {}
+    for item in _avp_client().list_policies(policyStoreId=store).get("policies", []):
+        pid = item.get("policyId", "")
+        # ListPolicies carries the description; the statement text needs GetPolicy.
+        full = _avp_client().get_policy(policyStoreId=store, policyId=pid)
+        static = (full.get("definition") or {}).get("static") or {}
+        name = names.get(pid, pid)
+        rows[name] = _policy_row(name, static.get("statement", ""), static.get("description", ""))
+    ordered = [rows[n] for n in POLICY_NAMES if n in rows]
+    return ordered + [rows[n] for n in rows if n not in POLICY_NAMES]
+
+
 def _reason(allowed: bool, policy_ids: list, mode: str) -> str:
     if allowed:
         return f"permit by {', '.join(policy_ids)} ({mode})"
