@@ -19,36 +19,54 @@ prompt can talk it into doing so. So nobody automates the fix.
 ## What Leash does
 
 A Strands agent receives CloudWatch alarms, diagnoses, and runs the fix — where **every action is
-first checked against Cedar policies in Amazon Verified Permissions**. It can restart, scale and
-clean up; it can never delete, never touch anything tagged `env=prod`, and never scale past a cap,
-no matter how it is prompted. Every decision, allowed or denied, is written to an audit trail.
+first checked against Cedar policies by a leash that lives in AWS and that the agent cannot
+touch**. It can restart, scale and clean up; it can never delete, never touch anything tagged
+`env=prod`, and never scale past a cap, no matter how it is prompted. Every decision, allowed or
+denied, is written to an audit trail *before* the agent is told the answer.
+
+**Bring your own brain.** The model is the one part of the system that does not need to be
+trusted, so it can run anywhere: in Lambda on Amazon Bedrock, or on a laptop with a local model,
+connected to the stack by SQS. The leash — the Cedar policies and the audit — always runs in AWS.
+The default deployment is the second shape, because it fits the AWS Free plan.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     CW[CloudWatch alarm<br/>leash-disk-dev / leash-ecs-dev] --> EB[EventBridge rule<br/>Alarm State Change = ALARM]
-    EB --> AG[Agent Lambda<br/>Strands + Bedrock]
-    AG -- "is this action allowed?" --> AVP[Verified Permissions<br/>Cedar policies]
-    AVP -- ALLOW --> SSM[SSM RunCommand<br/>clean disk]
-    AVP -- ALLOW --> ECS[ECS<br/>force new deployment]
-    AVP -- ALLOW --> ASG[Auto Scaling<br/>set desired capacity]
-    AG -- "every decision" --> DDB[(DynamoDB<br/>audit table)]
-    AG -- summary --> SNS[SNS topic<br/>email]
+    EB --> IQ[SQS incidents]
+    IQ --> BRAIN[The brain: Strands agent<br/>anywhere with a model<br/>Bedrock in Lambda, or a laptop]
+    BRAIN -- "may I? (op=authorize)" --> AZ[Authorizer Lambda<br/>cedarpy = the Cedar engine]
+    PB[(S3 policy bucket<br/>cedar/*.cedar, versioned)] -- hot reload --> AZ
+    AZ -- "row written first" --> DDB[(DynamoDB<br/>audit table)]
+    AZ -- ALLOW / DENY --> BRAIN
+    BRAIN -- ALLOW --> SSM[SSM RunCommand<br/>clean disk]
+    BRAIN -- ALLOW --> ECS[ECS<br/>force new deployment]
+    BRAIN -- ALLOW --> ASG[Auto Scaling<br/>set desired capacity]
+    BRAIN -- summary --> SNS[SNS topic<br/>email]
     APIGW[API Gateway<br/>HTTP API] --> API[API Lambda]
-    API -- "GET /audit" --> DDB
-    API -- "GET /policies" --> AVP
-    API -- "POST /ask" --> AG
+    API -- "GET /audit, /redteam, /reply" --> DDB
+    API -- "GET /policies" --> AZ
+    API -- "POST /ask, /redteam" --> RQ[SQS requests] --> BRAIN
     S3[S3 static dashboard] -. fetch .-> APIGW
 ```
 
+Two template parameters pick the shape. `Brain=worker` (default) queues alarms and requests for
+an agent process that runs anywhere (`local_demo/cloud_worker.py`); `Brain=bedrock` runs the
+agent in Lambda on Bedrock and EventBridge invokes it directly. `PolicyStore=s3` (default) is
+the authorizer Lambda above; `PolicyStore=avp` uses Amazon Verified Permissions instead. The
+agent code is identical in every combination.
+
 | Service | Role in Leash | Why this service |
 | --- | --- | --- |
-| **Amazon Verified Permissions** | Holds the four Cedar policies; every mutating tool asks `IsAuthorized` before touching anything. | The leash itself. Policy lives outside the model and outside the prompt, so no prompt injection can loosen it. Decisions come back with the policy ids that fired, which is what the audit trail shows. |
-| **Amazon Bedrock** | Runs the model behind the Strands agent (default `us.anthropic.claude-haiku-4-5-20251001-v1:0`, fallback `us.amazon.nova-lite-v1:0`). | Managed inference in-region with IAM auth; no API keys to leak into a Lambda. |
+| **Cedar** (AWS open source) + **AWS Lambda** | The authorizer function: evaluates the four Cedar policies with cedarpy (the Cedar Rust engine) and writes the audit row before it answers. | The leash itself. Policy lives outside the model and outside the prompt, so no prompt injection can loosen it. The process that asks never sees the policy text and cannot skip the audit. |
+| **Amazon S3** (policy bucket) | Versioned bucket holding `cedar/`; the authorizer hot-reloads when an object's ETag changes. | A policy store with history and rollback, on the Free plan. Edit a policy, it is live on the next decision. |
+| **Amazon Verified Permissions** | Optional (`PolicyStore=avp`): the same four policies as a managed store. | The managed version of the same engine, for accounts that have it. Same code path, same audit rows. |
+| **Amazon SQS** | Two queues: alarms (from EventBridge) and dashboard requests (from the API), consumed by the brain wherever it runs. | Lets the model run outside AWS without opening any inbound port; messages wait if the brain is down and nothing is lost. |
+| **Amazon Bedrock** | Optional (`Brain=bedrock`): the model behind the agent in Lambda. Default: a local Ollama model on the worker. | Managed inference with IAM auth when available; the Free plan does not include it, so the default keeps the brain on the worker. |
 | **Strands Agents SDK** | The agent loop: tools are plain Python functions with `@tool`. | Small, Bedrock-native, and the tool surface is exactly where we put the authorisation check. |
-| **AWS Lambda** | Agent function (300 s, 1 GB) and API function (30 s, 256 MB). | Event-driven; the agent only exists while an incident is being handled. Costs nothing at rest. |
-| **Amazon EventBridge** | Routes `CloudWatch Alarm State Change` events with `alarmName` prefix `leash-` into the agent. | Decouples alarms from the agent; the same rule can fan out to more targets later. |
+| **AWS Lambda** | Authorizer (30 s), API (30 s) and, in Bedrock mode, the agent (300 s) and the red-team runner (900 s). | Event-driven, nothing at rest. The authorizer is the only component that must be trusted, and it is tiny. |
+| **Amazon EventBridge** | Routes `CloudWatch Alarm State Change` events with `alarmName` prefix `leash-` to the incident queue (or straight to the agent Lambda). | Decouples alarms from the agent; the same rule can fan out to more targets later. |
 | **Amazon CloudWatch** | CWAgent `disk_used_percent` and Container Insights `RunningTaskCount` alarms. | The signal that starts everything. Alarm dimensions carry the resource ids the agent acts on. |
 | **AWS Systems Manager** | `AWS-RunShellScript` on the dev instance to free disk space. | No SSH, no inbound ports, and IAM can scope `SendCommand` to instances tagged `env=dev`. |
 | **Amazon ECS on Fargate** | The breakable nginx service `leash-api-dev`. | Killing a task is a realistic, repeatable incident; the fix (`forceNewDeployment`) is safe. |
@@ -61,9 +79,11 @@ flowchart LR
 ## How the leash works
 
 The agent never calls an AWS mutating API directly. Every mutating tool does three things in
-order: `authorize()` against Verified Permissions, act only if allowed, then `write_audit()` with
-the decision and the policy ids. The principal is always `Leash::Agent::"leash"`; the resource's
-`env` comes from its tags (missing tag = `"unknown"`, which is denied).
+order: `authorize()` (the authorizer Lambda, or Verified Permissions), act only if allowed, then
+report the result into the audit row. In the default shape the authorizer writes that row itself
+before replying, so the agent process holds no policy text and no audit-write permission at all.
+The principal is always `Leash::Agent::"leash"`; the resource's `env` comes from its tags
+(missing tag = `"unknown"`, which is denied).
 
 The four policies, as specified (**see `cedar/policies/` for the source of truth**):
 
@@ -101,17 +121,17 @@ forbid (
 
 Cedar is deny-by-default and `forbid` always wins over `permit`, so the model cannot argue its way
 past a policy: the worst it can do is ask, be denied, and have the denial recorded. Underneath, the
-agent's IAM role also has an explicit `Deny` on every delete/terminate API and can only send SSM
-commands to `env=dev` instances. Cedar is the leash; IAM is the floor. See
+agent's IAM role (Bedrock mode) also has an explicit `Deny` on every delete/terminate API and can
+only send SSM commands to `env=dev` instances. Cedar is the leash; IAM is the floor. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Deploy
 
 Prerequisites:
 
-- An AWS account with **Bedrock model access** enabled for the model in `BedrockModelId`
-  (Bedrock console -> Model access) in `us-east-1`.
-- AWS CLI v2 and SAM CLI installed and `aws sts get-caller-identity` working.
+- Any AWS account, **including the Free plan**. Bedrock model access is only needed for
+  `Brain=bedrock`; Verified Permissions only for `PolicyStore=avp`.
+- AWS CLI and SAM CLI installed and `aws sts get-caller-identity` working.
 - Python 3.11 on any OS. Dependencies are shipped as a **Lambda layer built for Linux x86_64 by
   `scripts/build-deps.sh`** (uv's cross-platform resolver), so `sam build` never runs pip against
   your own OS and no Docker is needed. `strands-agents -> mcp` declares `pywin32` for Windows,
@@ -126,8 +146,20 @@ aws cloudformation describe-stacks --stack-name leash --query 'Stacks[0].Outputs
 ```
 
 Parameters asked on first deploy: `AlertEmail` (confirm the SNS subscription email), `VpcId`,
-`SubnetId` (your default VPC is fine), optional `KeyName`, and `BedrockModelId`.
-Tear down with `scripts/teardown.sh` (empties the bucket, then `sam delete`).
+`SubnetId` (your default VPC is fine), optional `KeyName`, `Brain` (`worker` or `bedrock`),
+`PolicyStore` (`s3` or `avp`) and `BedrockModelId`. Tear down with `scripts/teardown.sh`.
+
+With `Brain=worker` (the default), start the brain on any machine with AWS credentials and a
+model. Everything it touches is real; only the model is local:
+
+```bash
+ollama pull qwen3:8b && ollama serve                  # or any tool-capable model
+PYTHONPATH=src python local_demo/cloud_worker.py      # polls the two queues, runs the agent
+```
+
+It prints every incident and request it handles. Alarms fire the same way as in Bedrock mode;
+the dashboard's Ask box and "Run 20 attacks" go through the request queue and the reply comes
+back through `GET /reply`.
 
 Run the tests locally (no AWS account needed; the Cedar policies are evaluated for real with
 [cedarpy](https://pypi.org/project/cedarpy/), and every boto3 client is faked). The same commands

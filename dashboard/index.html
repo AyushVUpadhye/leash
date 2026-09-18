@@ -409,14 +409,33 @@
     var btn = $("send"), out = $("reply");
     btn.disabled = true; out.className = ""; out.textContent = "Thinking… (denials take seconds; a real cleanup may exceed the 30 s API timeout - check the audit table)";
     fetch(API + "/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: msg }) })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
       .then(function (res) {
-        if (!res.ok || res.j.error) { out.className = "err"; out.textContent = "Error: " + (res.j.error || "request failed"); }
-        else { out.textContent = res.j.reply || JSON.stringify(res.j, null, 2); }
-        refresh();
+        if (!res.ok || res.j.error) { out.className = "err"; out.textContent = "Error: " + (res.j.error || "request failed"); btn.disabled = false; return; }
+        if (res.status === 202 && res.j.incident_id) { return waitForReply(res.j.incident_id, out, btn); }
+        out.textContent = res.j.reply || JSON.stringify(res.j, null, 2);
+        refresh(); btn.disabled = false;
       })
-      .catch(function (e) { out.className = "err"; out.textContent = "Error: " + e.message; })
-      .then(function () { btn.disabled = false; });
+      .catch(function (e) { out.className = "err"; out.textContent = "Error: " + e.message; btn.disabled = false; });
+  }
+
+  // Worker mode: the request is queued for the brain (wherever it runs); poll for the reply.
+  function waitForReply(incidentId, out, btn) {
+    var started = Date.now(), tries = 0;
+    out.textContent = "Queued as " + incidentId + ". The brain is working on it; every decision it makes lands in the audit trail above as it happens…";
+    (function poll() {
+      tries++;
+      fetch(API + "/reply?incident_id=" + encodeURIComponent(incidentId))
+        .then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
+        .then(function (res) {
+          refresh();
+          if (res.status === 200 && res.j.reply) { out.textContent = res.j.reply; btn.disabled = false; return; }
+          if (Date.now() - started > 600000) { out.className = "err"; out.textContent = "No reply after 10 minutes. Is the worker running? Decisions, if any, are in the audit trail."; btn.disabled = false; return; }
+          out.textContent = "Queued as " + incidentId + " · waiting " + Math.round((Date.now() - started) / 1000) + " s · the brain is diagnosing and asking the leash; watch the audit trail above";
+          setTimeout(poll, 3000);
+        })
+        .catch(function () { setTimeout(poll, 5000); });
+    })();
   }
 
   $("send").addEventListener("click", ask);

@@ -7,8 +7,10 @@ Serves three HTTP API (payload format v2) routes behind API Gateway:
     GET  /policies      -> {"items": [...]}   (the Cedar policies, via common.authz.list_policies)
     GET  /redteam       -> {"items": [...], "summary": {...}}  (attack rows + the numbers)
     POST /redteam       -> {"run_id": ...}   starts an attack run on the red-team Lambda (async)
-    POST /ask           -> invokes the agent Lambda synchronously with
-                           {"mode": "chat", "message": ...} and returns its JSON reply.
+    POST /ask           -> Bedrock mode: invokes the agent Lambda synchronously and returns its
+                           reply. Worker mode (REQUEST_QUEUE_URL set): queues the request and
+                           returns 202 {"incident_id"}; the reply arrives via GET /reply.
+    GET  /reply?incident_id=X -> {"reply": ...} once the worker has answered, else 202 pending
 
 Every response carries permissive CORS headers so the static dashboard on S3 can call it.
 Routing uses event["routeKey"] ("GET /audit"), which is how HTTP API v2 events identify the
@@ -32,6 +34,19 @@ MAX_MESSAGE_CHARS = 2000
 MAX_AUDIT_LIMIT = 200
 
 _lambda = None
+_sqs = None
+
+
+def _sqs_client():
+    global _sqs
+    if _sqs is None:
+        _sqs = boto3.client("sqs")
+    return _sqs
+
+
+def _queue(kind: str, payload: dict) -> None:
+    _sqs_client().send_message(QueueUrl=os.environ["REQUEST_QUEUE_URL"],
+                               MessageBody=json.dumps({"kind": kind, **payload}))
 
 
 def _lambda_client():
@@ -120,16 +135,32 @@ def _redteam_post(event: dict) -> dict:
     arms = body.get("arms") or ["leashed", "unleashed"]
     if not isinstance(arms, list) or not set(arms) <= {"leashed", "unleashed"}:
         return _error(400, "'arms' must be a list of 'leashed' and/or 'unleashed'")
-    function_name = os.environ.get("REDTEAM_FUNCTION_NAME")
-    if not function_name:
-        return _error(500, "REDTEAM_FUNCTION_NAME is not configured")
     from redteam.runner import _now_id
 
     run_id = _now_id()
     payload = {"n": n, "arms": arms, "run_id": run_id, "use_model": bool(body.get("use_model", True))}
+    if os.environ.get("REQUEST_QUEUE_URL"):
+        _queue("redteam", payload)
+        return _response(202, {"run_id": run_id, "n": n, "arms": arms, "status": "queued"})
+    function_name = os.environ.get("REDTEAM_FUNCTION_NAME")
+    if not function_name:
+        return _error(500, "REDTEAM_FUNCTION_NAME is not configured")
     _lambda_client().invoke(FunctionName=function_name, InvocationType="Event",
                             Payload=json.dumps(payload).encode("utf-8"))
     return _response(202, {"run_id": run_id, "n": n, "arms": arms})
+
+
+def _reply(event: dict) -> dict:
+    from common.audit import get_reply
+
+    params = event.get("queryStringParameters") or {}
+    incident_id = str(params.get("incident_id") or "").strip()
+    if not incident_id:
+        return _error(400, "incident_id is required")
+    row = get_reply(incident_id)
+    if not row:
+        return _response(202, {"incident_id": incident_id, "status": "pending"})
+    return _response(200, {"incident_id": incident_id, "reply": row.get("reply", ""), "at": row.get("at", "")})
 
 
 def _ask(event: dict) -> dict:
@@ -144,6 +175,13 @@ def _ask(event: dict) -> dict:
         return _error(400, "'message' (non-empty string) is required")
     if len(message) > MAX_MESSAGE_CHARS:
         return _error(400, f"message longer than {MAX_MESSAGE_CHARS} characters")
+
+    if os.environ.get("REQUEST_QUEUE_URL"):
+        from common.audit import timestamp
+
+        incident_id = "chat-" + timestamp().replace("-", "").replace(":", "").split(".")[0] + "Z"
+        _queue("chat", {"incident_id": incident_id, "message": message.strip()})
+        return _response(202, {"incident_id": incident_id, "status": "queued"})
 
     function_name = os.environ.get("AGENT_FUNCTION_NAME")
     if not function_name:
@@ -172,6 +210,7 @@ ROUTES = {
     "GET /audit": _audit,
     "GET /policies": _policies,
     "GET /redteam": _redteam_get,
+    "GET /reply": _reply,
     "POST /redteam": _redteam_post,
     "POST /ask": _ask,
 }

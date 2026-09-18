@@ -204,7 +204,7 @@ def handler(event, context):
     ts = _timestamp()
 
     if parsed["mode"] == "chat":
-        incident_id = f"chat-{ts}"
+        incident_id = str(event.get("incident_id") or f"chat-{ts}")
         if not parsed["message"]:
             return {"reply": "empty message", "incident_id": incident_id}
         tools.set_context(incident_id, "")

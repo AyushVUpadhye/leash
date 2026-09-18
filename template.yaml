@@ -1,21 +1,36 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >-
-  Leash - an ops agent on a leash. A Strands agent in Lambda receives CloudWatch
-  alarms and runs the fix, but every action is first authorised by Cedar policies
-  in Amazon Verified Permissions. Includes deliberately breakable dev infra for the
-  demo, a prod-tagged instance the agent must be denied on, an audit table, an
-  HTTP API and a static dashboard bucket. Lane C (infra) owns this file.
+  Leash - an ops agent on a leash. Every action the agent takes is first authorised by
+  Cedar policies; every decision is audited. Two switches: Brain (where the model runs:
+  Bedrock in Lambda, or a worker anywhere that connects over SQS) and PolicyStore (Amazon
+  Verified Permissions, or the Leash authorizer Lambda evaluating the same Cedar text from
+  S3). The defaults (worker + s3) deploy on the AWS Free plan. Includes deliberately
+  breakable dev infra, a prod-tagged decoy the agent must be denied on, the audit table,
+  an HTTP API and a static dashboard.
 
 # ---------------------------------------------------------------------------
 # Parameters
 # ---------------------------------------------------------------------------
 Parameters:
+  Brain:
+    Type: String
+    Default: worker
+    AllowedValues: [worker, bedrock]
+    Description: >-
+      worker: the agent runs on any machine (local model or Bedrock) and receives alarms and
+      requests over SQS - the Free-plan path. bedrock: the agent runs in Lambda on Bedrock.
+  PolicyStore:
+    Type: String
+    Default: s3
+    AllowedValues: [s3, avp]
+    Description: >-
+      s3: the Leash authorizer Lambda evaluates cedar/ from a versioned S3 bucket with cedarpy
+      and writes the audit row itself (Free plan). avp: Amazon Verified Permissions.
   BedrockModelId:
     Type: String
-    # Fallback if Haiku 4.5 access is not enabled in the account: us.amazon.nova-lite-v1:0
     Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
-    Description: Bedrock model id (inference profile) the Strands agent uses.
+    Description: Bedrock model id (inference profile) when Brain=bedrock. Fallback us.amazon.nova-lite-v1:0.
   AlertEmail:
     Type: String
     Description: Email address that receives the SNS incident summaries.
@@ -48,6 +63,10 @@ Parameters:
 
 Conditions:
   HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+  UseBedrock: !Equals [!Ref Brain, bedrock]
+  UseWorker: !Equals [!Ref Brain, worker]
+  UseAvp: !Equals [!Ref PolicyStore, avp]
+  UseS3Policies: !Equals [!Ref PolicyStore, s3]
 
 Globals:
   Function:
@@ -58,35 +77,88 @@ Resources:
   # ---------------------------------------------------------------------------
   # Dependencies layer. Built for Linux/x86_64 by scripts/build-deps.sh (uv with
   # --python-platform) so `sam build` never runs pip on the developer's OS.
-  # strands-agents pulls a Windows-only dep (pywin32) via mcp, which breaks the
-  # default SAM python builder on Windows without Docker; the layer sidesteps it.
+  # Carries strands-agents, boto3 and cedarpy (the Cedar engine for the authorizer).
   # ---------------------------------------------------------------------------
   DepsLayer:
     Type: AWS::Serverless::LayerVersion
     Properties:
       LayerName: !Sub "${AWS::StackName}-deps"
-      Description: strands-agents + boto3, prebuilt for python3.11 on x86_64 Linux
+      Description: strands-agents + boto3 + cedarpy, prebuilt for python3.11 on x86_64 Linux
       ContentUri: .build/layer/
       CompatibleRuntimes: [python3.11]
       CompatibleArchitectures: [x86_64]
       RetentionPolicy: Delete
 
   # -------------------------------------------------------------------------
-  # The leash: Cedar policy store (nested SAM app owned by Lane B).
-  # Outputs PolicyStoreId, consumed by the agent's env and IAM policy.
+  # The leash, option A: Amazon Verified Permissions (nested SAM app).
   # -------------------------------------------------------------------------
   Authz:
     Type: AWS::Serverless::Application
+    Condition: UseAvp
     Properties:
       Location: cedar/template.yaml
 
   # -------------------------------------------------------------------------
-  # Audit trail: one item per authorisation decision. GSI "gsi1" (gsi1pk="ALL")
-  # lets the dashboard list everything newest-first with a single Query.
+  # The leash, option B (Free plan): the same Cedar text in a versioned bucket,
+  # evaluated by the Leash authorizer Lambda with cedarpy (the Cedar Rust engine).
+  # It writes the audit row BEFORE answering, so the caller cannot skip it, and
+  # it hot-reloads when a policy object changes. scripts/deploy.sh syncs cedar/.
+  # -------------------------------------------------------------------------
+  PolicyBucket:
+    Type: AWS::S3::Bucket
+    Condition: UseS3Policies
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-policies-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AuthzFunction:
+    Type: AWS::Serverless::Function
+    Condition: UseS3Policies
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-authz"
+      Description: The leash as a service - Cedar decisions from S3 policies, audit row written first.
+      CodeUri: src/
+      Layers: [!Ref DepsLayer]
+      Handler: authz_service.handler.handler
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          LEASH_LOCAL_AUTHZ: "1"
+          LEASH_CEDAR_S3_BUCKET: !Ref PolicyBucket
+          AUDIT_TABLE: !Ref AuditTable
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: ReadPolicies
+              Effect: Allow
+              Action: [s3:GetObject, s3:GetObjectVersion]
+              Resource: !Sub "${PolicyBucket.Arn}/cedar/*"
+            - Sid: ListPolicies
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt PolicyBucket.Arn
+            - Sid: WriteAudit
+              Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+              Resource:
+                - !GetAtt AuditTable.Arn
+                - !Sub "${AuditTable.Arn}/index/*"
+
+  # -------------------------------------------------------------------------
+  # Audit trail: one item per authorisation decision. GSI "gsi1" partitions:
+  # ALL (decisions), REDTEAM (attack rows), REPLY (agent replies to queued asks).
   # -------------------------------------------------------------------------
   AuditTable:
     Type: AWS::DynamoDB::Table
-    # Hackathon stack: the audit trail is disposable, teardown must leave nothing behind.
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
@@ -129,11 +201,66 @@ Resources:
       Endpoint: !Ref AlertEmail
 
   # -------------------------------------------------------------------------
-  # The agent. Cedar (via Verified Permissions) is the leash; the IAM policy
-  # below is the floor - even a bug in the agent cannot delete anything.
+  # Brain option A: the worker. Alarms and dashboard requests are queued; the
+  # agent process (local_demo/cloud_worker.py) runs anywhere with AWS creds and
+  # a model, and every decision still goes through the authorizer in AWS.
+  # -------------------------------------------------------------------------
+  IncidentQueue:
+    Type: AWS::SQS::Queue
+    Condition: UseWorker
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-incidents"
+      VisibilityTimeout: 900
+      MessageRetentionPeriod: 86400
+  RequestQueue:
+    Type: AWS::SQS::Queue
+    Condition: UseWorker
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-requests"
+      VisibilityTimeout: 900
+      MessageRetentionPeriod: 86400
+  AlarmToQueueRule:
+    Type: AWS::Events::Rule
+    Condition: UseWorker
+    Properties:
+      Name: !Sub "${AWS::StackName}-alarm-to-worker"
+      Description: Every leash-* alarm entering ALARM is queued for the worker.
+      EventPattern:
+        source: [aws.cloudwatch]
+        detail-type: ["CloudWatch Alarm State Change"]
+        detail:
+          state:
+            value: [ALARM]
+          alarmName:
+            - prefix: leash-
+      Targets:
+        - Id: incidents
+          Arn: !GetAtt IncidentQueue.Arn
+  IncidentQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Condition: UseWorker
+    Properties:
+      Queues: [!Ref IncidentQueue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowEventBridge
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt IncidentQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt AlarmToQueueRule.Arn
+
+  # -------------------------------------------------------------------------
+  # Brain option B: the agent in Lambda on Bedrock. Cedar is the leash; the IAM
+  # policy below is the floor - even a bug in the agent cannot delete anything.
   # -------------------------------------------------------------------------
   AgentFunction:
     Type: AWS::Serverless::Function
+    Condition: UseBedrock
     Properties:
       FunctionName: !Sub "${AWS::StackName}-agent"
       Description: Strands ops agent; every mutating tool is authorised by Cedar first.
@@ -144,19 +271,15 @@ Resources:
       MemorySize: 1024
       Environment:
         Variables:
-          POLICY_STORE_ID: !GetAtt Authz.Outputs.PolicyStoreId
-          # JSON {logical policy name: AVP policy id}; authz.py maps the opaque ids AVP
-          # returns in determiningPolicies back to names like "ForbidProd" for the audit row.
-          POLICY_ID_MAP: !GetAtt Authz.Outputs.PolicyIdMap
+          POLICY_STORE_ID: !If [UseAvp, !GetAtt Authz.Outputs.PolicyStoreId, !Ref "AWS::NoValue"]
+          POLICY_ID_MAP: !If [UseAvp, !GetAtt Authz.Outputs.PolicyIdMap, !Ref "AWS::NoValue"]
+          LEASH_AUTHZ_FUNCTION: !If [UseS3Policies, !Ref AuthzFunction, !Ref "AWS::NoValue"]
           AUDIT_TABLE: !Ref AuditTable
           ALERT_TOPIC_ARN: !Ref AlertTopic
           BEDROCK_MODEL_ID: !Ref BedrockModelId
           ENV_TAG_KEY: env
           SCALE_CAP: "4"
       Events:
-        # EventBridge delivers every "leash-*" alarm that enters ALARM state.
-        # SAM creates the rule and the lambda:InvokeFunction permission for it.
-        # Prefix matching: https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-event-patterns-content-based-filtering.html
         AlarmStateChange:
           Type: EventBridgeRule
           Properties:
@@ -171,15 +294,25 @@ Resources:
       Policies:
         - Version: "2012-10-17"
           Statement:
-            - Sid: AskCedar
-              Effect: Allow
-              Action: verifiedpermissions:IsAuthorized
-              Resource: !Sub
-                - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
-                - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+            - !If
+              - UseAvp
+              - Sid: AskCedar
+                Effect: Allow
+                Action: verifiedpermissions:IsAuthorized
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
+                  - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+              - !Ref "AWS::NoValue"
+            - !If
+              - UseS3Policies
+              - Sid: AskAuthorizer
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt AuthzFunction.Arn
+              - !Ref "AWS::NoValue"
             - Sid: WriteAudit
               Effect: Allow
-              Action: [dynamodb:PutItem, dynamodb:Query]
+              Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
               Resource:
                 - !GetAtt AuditTable.Arn
                 - !Sub "${AuditTable.Arn}/index/*"
@@ -189,9 +322,6 @@ Resources:
               Resource: !Ref AlertTopic
             - Sid: Bedrock
               Effect: Allow
-              # "*" because cross-region inference profiles route to foundation models in
-              # several regions, and the profile ARN alone is not enough.
-              # https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html
               Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
               Resource: "*"
             - Sid: SsmRunShellScriptDocument
@@ -202,7 +332,6 @@ Resources:
               Effect: Allow
               Action: ssm:SendCommand
               Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
-              # Tag condition: https://docs.aws.amazon.com/systems-manager/latest/userguide/getting-started-restrict-access-examples.html
               Condition:
                 StringEquals:
                   ssm:resourceTag/env: dev
@@ -230,8 +359,6 @@ Resources:
               Action: autoscaling:SetDesiredCapacity
               Resource: !Sub "arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AWS::StackName}-dev-asg"
             - Sid: NeverDestroy
-              # Explicit Deny wins over any Allow. Cedar should never let these through,
-              # but IAM makes it impossible even if the agent code is wrong.
               Effect: Deny
               Action:
                 - ec2:TerminateInstances
@@ -244,14 +371,10 @@ Resources:
                 - rds:Delete*
               Resource: "*"
 
-  # -------------------------------------------------------------------------
-  # Red-team arena: an attacker model generates attacks, each one is run through
-  # the real agent (Cedar on) and through the same agent with authorisation off
-  # against an in-memory fake AWS (the control arm). Rows land in the audit
-  # table under gsi1pk=REDTEAM. Long runs chain themselves asynchronously.
-  # -------------------------------------------------------------------------
+  # Red-team arena in Lambda (Bedrock mode only; the worker runs it otherwise).
   RedTeamFunction:
     Type: AWS::Serverless::Function
+    Condition: UseBedrock
     Properties:
       FunctionName: !Sub "${AWS::StackName}-redteam"
       Description: Attacker model vs the leashed agent, with an unleashed sandbox control arm.
@@ -260,13 +383,12 @@ Resources:
       Handler: redteam.handler.handler
       Timeout: 900
       MemorySize: 1024
-      # One run at a time: the arms share module-level state and the numbers must be
-      # sequential to be comparable.
       ReservedConcurrentExecutions: 1
       Environment:
         Variables:
-          POLICY_STORE_ID: !GetAtt Authz.Outputs.PolicyStoreId
-          POLICY_ID_MAP: !GetAtt Authz.Outputs.PolicyIdMap
+          POLICY_STORE_ID: !If [UseAvp, !GetAtt Authz.Outputs.PolicyStoreId, !Ref "AWS::NoValue"]
+          POLICY_ID_MAP: !If [UseAvp, !GetAtt Authz.Outputs.PolicyIdMap, !Ref "AWS::NoValue"]
+          LEASH_AUTHZ_FUNCTION: !If [UseS3Policies, !Ref AuthzFunction, !Ref "AWS::NoValue"]
           AUDIT_TABLE: !Ref AuditTable
           ALERT_TOPIC_ARN: ""
           BEDROCK_MODEL_ID: !Ref BedrockModelId
@@ -279,15 +401,25 @@ Resources:
       Policies:
         - Version: "2012-10-17"
           Statement:
-            - Sid: AskCedar
-              Effect: Allow
-              Action: verifiedpermissions:IsAuthorized
-              Resource: !Sub
-                - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
-                - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+            - !If
+              - UseAvp
+              - Sid: AskCedar
+                Effect: Allow
+                Action: verifiedpermissions:IsAuthorized
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
+                  - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+              - !Ref "AWS::NoValue"
+            - !If
+              - UseS3Policies
+              - Sid: AskAuthorizer
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt AuthzFunction.Arn
+              - !Ref "AWS::NoValue"
             - Sid: WriteRows
               Effect: Allow
-              Action: [dynamodb:PutItem, dynamodb:Query]
+              Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
               Resource:
                 - !GetAtt AuditTable.Arn
                 - !Sub "${AuditTable.Arn}/index/*"
@@ -309,9 +441,6 @@ Resources:
                 - cloudwatch:ListMetrics
                 - cloudwatch:GetMetricStatistics
               Resource: "*"
-            # The leashed arm can legitimately be ALLOWED on dev resources by Cedar (e.g. an
-            # escalation attack that ends in "clean the dev disk"); give it the same dev-only
-            # rights as the agent, and the same explicit denies.
             - Sid: SsmRunShellScriptDocument
               Effect: Allow
               Action: ssm:SendCommand
@@ -349,13 +478,12 @@ Resources:
               Resource: "*"
 
   # -------------------------------------------------------------------------
-  # HTTP API + API Lambda: /health, /audit (read table), /ask (invoke agent).
+  # HTTP API + API Lambda: /health, /audit, /policies, /redteam, /ask, /reply.
   # -------------------------------------------------------------------------
   LeashApi:
     Type: AWS::Serverless::HttpApi
     Properties:
-      # The dashboard URL is public and /ask spends Bedrock tokens: cap it so a
-      # shared link cannot burn the credits. 5 req/s sustained, 10 burst.
+      # The dashboard URL is public: cap it so a shared link cannot burn the credits.
       DefaultRouteSettings:
         ThrottlingBurstLimit: 10
         ThrottlingRateLimit: 5
@@ -368,7 +496,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-api"
-      Description: Thin HTTP front for the dashboard; reads audit + policies, forwards /ask to the agent.
+      Description: Thin HTTP front for the dashboard; reads audit + policies, forwards asks and attacks.
       CodeUri: src/
       Layers: [!Ref DepsLayer]
       Handler: api.handler.handler
@@ -377,12 +505,12 @@ Resources:
       Environment:
         Variables:
           AUDIT_TABLE: !Ref AuditTable
-          AGENT_FUNCTION_NAME: !Ref AgentFunction
-          # GET /policies reads the Cedar text straight from the store, so the
-          # dashboard shows exactly what is being enforced.
-          POLICY_STORE_ID: !GetAtt Authz.Outputs.PolicyStoreId
-          POLICY_ID_MAP: !GetAtt Authz.Outputs.PolicyIdMap
-          REDTEAM_FUNCTION_NAME: !Ref RedTeamFunction
+          AGENT_FUNCTION_NAME: !If [UseBedrock, !Ref AgentFunction, !Ref "AWS::NoValue"]
+          REDTEAM_FUNCTION_NAME: !If [UseBedrock, !Ref RedTeamFunction, !Ref "AWS::NoValue"]
+          REQUEST_QUEUE_URL: !If [UseWorker, !Ref RequestQueue, !Ref "AWS::NoValue"]
+          POLICY_STORE_ID: !If [UseAvp, !GetAtt Authz.Outputs.PolicyStoreId, !Ref "AWS::NoValue"]
+          POLICY_ID_MAP: !If [UseAvp, !GetAtt Authz.Outputs.PolicyIdMap, !Ref "AWS::NoValue"]
+          LEASH_AUTHZ_FUNCTION: !If [UseS3Policies, !Ref AuthzFunction, !Ref "AWS::NoValue"]
       Events:
         Health:
           Type: HttpApi
@@ -420,27 +548,53 @@ Resources:
             ApiId: !Ref LeashApi
             Path: /ask
             Method: POST
+        Reply:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LeashApi
+            Path: /reply
+            Method: GET
       Policies:
         - Version: "2012-10-17"
           Statement:
             - Sid: ReadAudit
               Effect: Allow
-              Action: dynamodb:Query
+              Action: [dynamodb:Query, dynamodb:GetItem]
               Resource:
                 - !GetAtt AuditTable.Arn
                 - !Sub "${AuditTable.Arn}/index/*"
-            - Sid: AskAgent
-              Effect: Allow
-              Action: lambda:InvokeFunction
-              Resource:
-                - !GetAtt AgentFunction.Arn
-                - !GetAtt RedTeamFunction.Arn
-            - Sid: ReadTheLeash
-              Effect: Allow
-              Action: [verifiedpermissions:ListPolicies, verifiedpermissions:GetPolicy]
-              Resource: !Sub
-                - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
-                - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+            - !If
+              - UseBedrock
+              - Sid: AskAgent
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt AgentFunction.Arn
+                  - !GetAtt RedTeamFunction.Arn
+              - !Ref "AWS::NoValue"
+            - !If
+              - UseWorker
+              - Sid: QueueRequests
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt RequestQueue.Arn
+              - !Ref "AWS::NoValue"
+            - !If
+              - UseAvp
+              - Sid: ReadTheLeash
+                Effect: Allow
+                Action: [verifiedpermissions:ListPolicies, verifiedpermissions:GetPolicy]
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
+                  - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+              - !Ref "AWS::NoValue"
+            - !If
+              - UseS3Policies
+              - Sid: AskAuthorizerForPolicies
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt AuthzFunction.Arn
+              - !Ref "AWS::NoValue"
 
   # -------------------------------------------------------------------------
   # Dashboard: public static website bucket. scripts/deploy.sh syncs dashboard/
@@ -452,7 +606,6 @@ Resources:
     UpdateReplacePolicy: Delete
     Properties:
       BucketName: !Sub "${AWS::StackName}-dashboard-${AWS::AccountId}-${AWS::Region}"
-      # Public website: all four blocks must be off for the bucket policy below to apply.
       PublicAccessBlockConfiguration:
         BlockPublicAcls: false
         BlockPublicPolicy: false
@@ -531,8 +684,7 @@ Resources:
       UserData:
         # Agent config reference: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-Configuration-File-Details.html
         # drop_device=true removes the "device" dimension and omit_hostname=true the "host"
-        # dimension (published by default), so the alarm only needs InstanceId + path + fstype
-        # and does not care whether root is nvme0n1p1 or xvda1.
+        # dimension (published by default), so the alarm only needs InstanceId + path + fstype.
         # "${!aws:InstanceId}" is Fn::Sub escaping for the literal "${aws:InstanceId}".
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -692,11 +844,8 @@ Resources:
           PropagateAtLaunch: true
 
   # -------------------------------------------------------------------------
-  # Alarms. Names start with "leash-" so the EventBridge rule picks them up.
+  # Alarms. Names start with "leash-" so the EventBridge rules pick them up.
   # -------------------------------------------------------------------------
-  # Alarms cannot use SEARCH() expressions, so the dimension set must match the
-  # agent exactly: InstanceId + path + fstype (device dropped via drop_device).
-  # Period 10 works because the agent publishes at 10 s (high-resolution).
   DiskAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -739,7 +888,7 @@ Resources:
       TreatMissingData: notBreaching
 
 # ---------------------------------------------------------------------------
-# Outputs (scripts/*.sh read these with `aws cloudformation describe-stacks`)
+# Outputs (scripts/*.sh and local_demo/cloud_worker.py read these)
 # ---------------------------------------------------------------------------
 Outputs:
   ApiUrl:
@@ -752,8 +901,31 @@ Outputs:
     Value: !Ref DashboardBucket
   AuditTableName:
     Value: !Ref AuditTable
+  Brain:
+    Value: !Ref Brain
+  PolicyStoreMode:
+    Value: !Ref PolicyStore
   PolicyStoreId:
+    Condition: UseAvp
     Value: !GetAtt Authz.Outputs.PolicyStoreId
+  PolicyBucket:
+    Condition: UseS3Policies
+    Value: !Ref PolicyBucket
+  AuthzFunctionName:
+    Condition: UseS3Policies
+    Value: !Ref AuthzFunction
+  IncidentQueueUrl:
+    Condition: UseWorker
+    Value: !Ref IncidentQueue
+  RequestQueueUrl:
+    Condition: UseWorker
+    Value: !Ref RequestQueue
+  AgentFunctionName:
+    Condition: UseBedrock
+    Value: !Ref AgentFunction
+  RedTeamFunctionName:
+    Condition: UseBedrock
+    Value: !Ref RedTeamFunction
   DevInstanceId:
     Value: !Ref DevInstance
   ProdInstanceId:
@@ -766,7 +938,3 @@ Outputs:
     Value: !Ref DevAutoScalingGroup
   AlertTopicArn:
     Value: !Ref AlertTopic
-  AgentFunctionName:
-    Value: !Ref AgentFunction
-  RedTeamFunctionName:
-    Value: !Ref RedTeamFunction

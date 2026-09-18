@@ -26,7 +26,7 @@ CLEAN_DISK_SCRIPT = [
     "set +e",
     "BEFORE=$(df --output=pcent / | tail -1 | tr -dc '0-9')",
     "echo \"before: $(df -h / | tail -1)\"",
-    "rm -f /tmp/leash-fill*",
+    "rm -f /tmp/leash-fill* /var/tmp/leash-fill*",  # /tmp is tmpfs on AL2023; the demo fills /var/tmp
     "journalctl --vacuum-size=50M >/dev/null 2>&1 || true",
     "find /var/log -type f -name '*.gz' -delete 2>/dev/null || true",
     "sync",
@@ -40,6 +40,7 @@ def set_context(incident_id: str, alarm_name: str = "") -> None:
     """Called by the handler once per invocation before the agent runs."""
     _CTX["incident_id"] = incident_id
     _CTX["alarm_name"] = alarm_name
+    authz.set_audit_context(incident_id, alarm_name)
 
 
 AUDIT_FAILED = " (audit write FAILED)"
@@ -66,8 +67,15 @@ def _decide(action: str, rtype: str, rid: str, env: str, context: dict | None = 
 
 
 def _audit(action: str, rtype: str, rid: str, env: str, decision, result: str, summary: str = "") -> bool:
-    """Write the audit row; returns False (and logs) if it could not be written."""
+    """Write the audit row; returns False (and logs) if it could not be written.
+
+    When the authorizer service already wrote the row (decision.audit_ref), only the result is
+    filled in - the decision itself was recorded before this process could act on it."""
     try:
+        ref = getattr(decision, "audit_ref", None)
+        if ref:
+            audit.update_result(ref, result)
+            return True
         audit.write_audit(
             incident_id=_CTX["incident_id"],
             action=action,
@@ -152,7 +160,7 @@ def get_service_info(cluster: str, service: str) -> str:
 
 @tool
 def clean_disk(instance_id: str) -> str:
-    """Free disk space on an instance via SSM: remove /tmp/leash-fill*, vacuum journald to 50M,
+    """Free disk space on an instance via SSM: remove leash-fill files, vacuum journald to 50M,
     delete rotated *.gz logs under /var/log. Requires Cedar cleanDisk permission.
 
     Args:

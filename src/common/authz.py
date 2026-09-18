@@ -1,10 +1,17 @@
 """Authorisation for every Leash action: ask Cedar before touching anything.
 
-Default mode calls Amazon Verified Permissions (IsAuthorized) on the policy store in
-POLICY_STORE_ID. With LEASH_LOCAL_AUTHZ="1" the same request is evaluated locally with
-cedarpy against cedar/policies/*.cedar + cedar/schema.json (tests, offline demo).
+Three backends, same request, same Decision:
 
-Either way the answer is a Decision and any failure is a DENY ("authz-error: ...").
+  LEASH_AUTHZ_FUNCTION=<name>   invoke the Leash authorizer Lambda (src/authz_service). It holds
+                                the policies (S3) and writes the audit row before answering. This
+                                is the Free-plan path and the strictest one: the caller never
+                                sees policy text and cannot skip the audit.
+  LEASH_LOCAL_AUTHZ=1           evaluate with cedarpy right here, from cedar/ on disk or from the
+                                S3 bucket in LEASH_CEDAR_S3_BUCKET (the authorizer Lambda itself,
+                                the API's /policies, tests, the offline demo).
+  otherwise                     Amazon Verified Permissions (IsAuthorized) on POLICY_STORE_ID.
+
+Any failure is a DENY ("authz-error: ...").
 """
 
 import json
@@ -18,7 +25,16 @@ RESOURCE_TYPES = ("Instance", "EcsService", "AutoScalingGroup")
 POLICY_NAMES = ("PermitDevRemediation", "ForbidDestructive", "ForbidProd", "ForbidScaleAboveCap")
 
 _AVP = None  # cached boto3 client
-_LOCAL: dict = {}  # cached cedarpy inputs: {"policies", "schema", "dir"}
+_LAMBDA = None  # cached boto3 client for the authorizer function
+_LOCAL: dict = {}  # cached cedarpy inputs: {"policies", "schema", "dir" | "etag", "version"}
+_S3: dict = {}  # cached policy texts from S3: {"etag": ..., "files": {name: text}, "version": ...}
+_AUDIT_CTX = {"incident_id": "unset", "alarm_name": ""}  # sent along to the authorizer Lambda
+
+
+def set_audit_context(incident_id: str, alarm_name: str = "") -> None:
+    """The authorizer Lambda writes the audit row itself, so it needs to know the incident."""
+    _AUDIT_CTX["incident_id"] = incident_id
+    _AUDIT_CTX["alarm_name"] = alarm_name
 
 
 @dataclass
@@ -29,6 +45,9 @@ class Decision:
     policy_ids: list = field(default_factory=list)
     reason: str = ""
     errors: list = field(default_factory=list)
+    # Set when the authorizer service already wrote the audit row: {"pk", "sk"}. The tool then
+    # only reports its result into that row instead of writing a second one.
+    audit_ref: dict | None = None
 
 
 def authorize(action: str, resource_type: str, resource_id: str, resource_env: str,
@@ -41,11 +60,57 @@ def authorize(action: str, resource_type: str, resource_id: str, resource_env: s
     try:
         if resource_type not in RESOURCE_TYPES:
             raise ValueError(f"unknown resource_type {resource_type!r}")
+        if os.environ.get("LEASH_AUTHZ_FUNCTION"):
+            return _authorize_lambda(action, resource_type, resource_id, resource_env, context or {})
         if os.environ.get("LEASH_LOCAL_AUTHZ") == "1":
             return _authorize_local(action, resource_type, resource_id, resource_env, context or {})
         return _authorize_avp(action, resource_type, resource_id, resource_env, context or {})
     except Exception as exc:  # noqa: BLE001 - fail closed, whatever went wrong
         return Decision(allowed=False, policy_ids=[], reason=f"authz-error: {exc}", errors=[str(exc)])
+
+
+def evaluate_local(action, resource_type, resource_id, resource_env, context) -> Decision:
+    """Public entry for the authorizer Lambda: cedarpy evaluation, fail closed."""
+    try:
+        if resource_type not in RESOURCE_TYPES:
+            raise ValueError(f"unknown resource_type {resource_type!r}")
+        return _authorize_local(action, resource_type, resource_id, resource_env, context or {})
+    except Exception as exc:  # noqa: BLE001
+        return Decision(allowed=False, policy_ids=[], reason=f"authz-error: {exc}", errors=[str(exc)])
+
+
+# --- the authorizer Lambda ----------------------------------------------------------
+
+
+def _lambda_client():
+    global _LAMBDA
+    if _LAMBDA is None:
+        import boto3
+
+        _LAMBDA = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    return _LAMBDA
+
+
+def _invoke_authz(payload: dict) -> dict:
+    resp = _lambda_client().invoke(
+        FunctionName=os.environ["LEASH_AUTHZ_FUNCTION"], InvocationType="RequestResponse",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+    data = json.loads(resp["Payload"].read() or b"{}")
+    if resp.get("FunctionError") or (isinstance(data, dict) and data.get("error")):
+        raise RuntimeError(f"authorizer failed: {data.get('error') if isinstance(data, dict) else data}")
+    return data
+
+
+def _authorize_lambda(action, resource_type, resource_id, resource_env, context) -> Decision:
+    data = _invoke_authz({
+        "op": "authorize", "action": action, "resource_type": resource_type, "resource_id": resource_id,
+        "resource_env": resource_env, "context": context or None,
+        "incident_id": _AUDIT_CTX["incident_id"], "alarm_name": _AUDIT_CTX["alarm_name"],
+    })
+    return Decision(allowed=bool(data.get("allowed")), policy_ids=list(data.get("policy_ids") or []),
+                    reason=str(data.get("reason", "")), errors=list(data.get("errors") or []),
+                    audit_ref=data.get("audit_ref") or None)
 
 
 # --- Amazon Verified Permissions ------------------------------------------------
@@ -106,6 +171,11 @@ def _authorize_avp(action, resource_type, resource_id, resource_env, context) ->
 # --- local evaluation with cedarpy --------------------------------------------------
 
 
+def reset_cache() -> None:
+    _LOCAL.clear()
+    _S3.clear()
+
+
 def cedar_dir() -> Path:
     """cedar/ directory: LEASH_CEDAR_DIR, else the repo's cedar/ next to src/."""
     override = os.environ.get("LEASH_CEDAR_DIR")
@@ -114,16 +184,51 @@ def cedar_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "cedar"
 
 
-def _load_local() -> dict:
-    """Read the four policies (with an in-memory @id so diagnostics name them) and the schema."""
+def _policy_files() -> tuple[dict, str]:
+    """{name: text} for the policies plus 'schema', and a version string, from S3 or disk."""
+    bucket = os.environ.get("LEASH_CEDAR_S3_BUCKET")
+    if bucket:
+        return _policy_files_s3(bucket)
     base = cedar_dir()
-    if _LOCAL.get("dir") != base:
-        parts = []
+    files = {name: (base / "policies" / f"{name}.cedar").read_text(encoding="utf-8") for name in POLICY_NAMES}
+    files["schema"] = (base / "schema.json").read_text(encoding="utf-8")
+    return files, f"disk:{base}"
+
+
+def _policy_files_s3(bucket: str) -> tuple[dict, str]:
+    """Policies from s3://bucket/cedar/. One ListObjects per call detects a change (ETags), so an
+    edited policy is live on the next decision without a redeploy."""
+    import boto3
+
+    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    listing = s3.list_objects_v2(Bucket=bucket, Prefix="cedar/")
+    etags = {o["Key"]: o["ETag"] for o in listing.get("Contents", [])}
+    version = "s3:" + ",".join(f"{k}={v.strip(chr(34))[:8]}" for k, v in sorted(etags.items()))
+    if _S3.get("version") != version:
+        files = {}
         for name in POLICY_NAMES:
-            text = (base / "policies" / f"{name}.cedar").read_text(encoding="utf-8")
-            parts.append(f'@id("{name}")\n{text}')
-        _LOCAL.update(dir=base, policies="\n".join(parts),
-                      schema=json.loads((base / "schema.json").read_text(encoding="utf-8")))
+            obj = s3.get_object(Bucket=bucket, Key=f"cedar/policies/{name}.cedar")
+            files[name] = obj["Body"].read().decode("utf-8")
+        files["schema"] = s3.get_object(Bucket=bucket, Key="cedar/schema.json")["Body"].read().decode("utf-8")
+        _S3.update(version=version, files=files)
+    return _S3["files"], _S3["version"]
+
+
+def policy_version() -> str:
+    """Identifies the policy set currently in force (S3 ETags or the disk path)."""
+    try:
+        return _policy_files()[1]
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown: {exc}"
+
+
+def _load_local() -> dict:
+    """Cedarpy inputs (policies with an @id each so diagnostics name them, and the schema),
+    rebuilt whenever the policy set version changes."""
+    files, version = _policy_files()
+    if _LOCAL.get("version") != version:
+        parts = [f'@id("{name}")\n{files[name]}' for name in POLICY_NAMES]
+        _LOCAL.update(version=version, policies="\n".join(parts), schema=json.loads(files["schema"]))
     return _LOCAL
 
 
@@ -163,13 +268,11 @@ def list_policies() -> list[dict]:
     text comes from Verified Permissions itself (ListPolicies + GetPolicy), so what is shown is
     what is enforced. Failures raise; the API turns them into a 500 with the message.
     """
+    if os.environ.get("LEASH_AUTHZ_FUNCTION"):
+        return list(_invoke_authz({"op": "list_policies"}).get("items") or [])
     if os.environ.get("LEASH_LOCAL_AUTHZ") == "1":
-        base = cedar_dir()
-        out = []
-        for name in POLICY_NAMES:
-            text = (base / "policies" / f"{name}.cedar").read_text(encoding="utf-8")
-            out.append(_policy_row(name, text, ""))
-        return out
+        files, _ = _policy_files()
+        return [_policy_row(name, files[name], "") for name in POLICY_NAMES]
     return _list_policies_avp()
 
 
