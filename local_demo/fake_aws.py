@@ -40,6 +40,16 @@ class World:
         self.commands = {}  # command_id -> {"instance_id", "status", "stdout", "stderr"}
         self.audit_items = []  # list of dicts, newest last (list_audit reverses)
 
+    def alias(self, dev_instance: str = "", prod_instance: str = "", asg_name: str = ""):
+        """Make the fake world answer to the deployment's real resource ids as well as its own,
+        so red-team attacks that name real ids do real (fake) damage in the control arm."""
+        if dev_instance and dev_instance not in self.instances:
+            self.instances[dev_instance] = dict(self.instances["i-0de70000000000001"])
+        if prod_instance and prod_instance not in self.instances:
+            self.instances[prod_instance] = dict(self.instances["i-0a0d0000000000001"])
+        if asg_name and asg_name not in self.asgs:
+            self.asgs[asg_name] = dict(self.asgs["leash-dev-asg"])
+
     def reset_resources(self):
         """Put every resource back to its starting state but keep the audit rows: the red-team
         runner does this between arms so damage is measured per attack without losing history."""

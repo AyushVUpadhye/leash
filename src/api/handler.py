@@ -115,7 +115,13 @@ def _redteam_get(event: dict) -> dict:
     except (TypeError, ValueError):
         return _error(400, "limit must be an integer")
     rows = list_redteam(limit=max(1, min(limit, 500)))
-    return _response(200, {"items": rows, "summary": summarise(rows)})
+    run = str(params.get("run") or "all")
+    if run == "latest" and rows:
+        latest = max(r.get("run_id", "") for r in rows)
+        rows = [r for r in rows if r.get("run_id") == latest]
+    elif run not in ("all", ""):
+        rows = [r for r in rows if r.get("run_id") == run]
+    return _response(200, {"items": rows, "summary": summarise(rows), "run": run})
 
 
 MAX_REDTEAM_N = 100
