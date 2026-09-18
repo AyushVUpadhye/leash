@@ -1,2 +1,4 @@
 strands-agents==1.56.0
 boto3>=1.34
+# Cedar evaluation inside AWS without Verified Permissions (the Free-plan authorizer Lambda).
+cedarpy==4.12.0

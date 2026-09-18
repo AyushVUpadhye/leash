@@ -45,6 +45,12 @@ printf 'window.LEASH_CONFIG = { apiUrl: "%s", devInstanceId: "%s", prodInstanceI
 log "syncing dashboard/ to s3://$bucket"
 aws s3 sync dashboard/ "s3://$bucket/" --delete
 
+# Free-plan policy store: the authorizer Lambda reads cedar/ from this bucket and hot-reloads.
+if policy_bucket="$(stack_output PolicyBucket 2>/dev/null)"; then
+  log "publishing cedar/ policies to s3://$policy_bucket/cedar/"
+  aws s3 sync cedar/ "s3://$policy_bucket/cedar/" --exclude "template.yaml" --exclude "README.md" --delete
+fi
+
 log "done"
 log "  API:       $api_url"
 log "  Dashboard: $dashboard_url"

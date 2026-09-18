@@ -192,6 +192,19 @@ class _FakeDynamoDB:
         WORLD.audit_items.append(Item)
         return {}
 
+    def get_item(self, TableName, Key):
+        for it in WORLD.audit_items:
+            if it.get("pk") == Key["pk"] and it.get("sk") == Key["sk"]:
+                return {"Item": it}
+        return {}
+
+    def update_item(self, TableName, Key, UpdateExpression, ExpressionAttributeNames, ExpressionAttributeValues):
+        for it in WORLD.audit_items:
+            if it.get("pk") == Key["pk"] and it.get("sk") == Key["sk"]:
+                it["result"] = ExpressionAttributeValues[":r"]
+                return {}
+        raise KeyError("row not found")
+
     def query(self, TableName, IndexName, KeyConditionExpression, ExpressionAttributeValues,
               ScanIndexForward, Limit):
         want = next(iter(ExpressionAttributeValues.values()))["S"]

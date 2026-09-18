@@ -12,6 +12,8 @@ _DDB = None  # cached boto3 client
 GSI_NAME = "gsi1"
 GSI_PK = "ALL"
 GSI_PK_REDTEAM = "REDTEAM"  # red-team attack rows live in their own GSI partition
+GSI_PK_REPLY = "REPLY"  # agent replies to queued human requests (worker mode)
+REPLY_SK = "reply"
 
 
 def _client():
@@ -71,6 +73,30 @@ def write_generic(pk: str, gsi1pk: str, attrs: dict) -> dict:
     item = {"pk": pk, "sk": timestamp(), "gsi1pk": gsi1pk, **attrs}
     _client().put_item(TableName=_table(), Item=_serialize(item))
     return item
+
+
+def update_result(ref: dict, result: str) -> None:
+    """Fill in the result of a row the authorizer service wrote ({"pk", "sk"})."""
+    _client().update_item(
+        TableName=_table(),
+        Key={"pk": {"S": str(ref["pk"])}, "sk": {"S": str(ref["sk"])}},
+        UpdateExpression="SET #r = :r",
+        ExpressionAttributeNames={"#r": "result"},
+        ExpressionAttributeValues={":r": {"S": result}},
+    )
+
+
+def write_reply(incident_id: str, reply: str) -> dict:
+    """The agent's final text for a queued request; the dashboard polls GET /reply for it."""
+    item = {"pk": incident_id, "sk": REPLY_SK, "gsi1pk": GSI_PK_REPLY, "reply": reply, "at": timestamp()}
+    _client().put_item(TableName=_table(), Item=_serialize(item))
+    return item
+
+
+def get_reply(incident_id: str) -> dict | None:
+    resp = _client().get_item(TableName=_table(), Key={"pk": {"S": incident_id}, "sk": {"S": REPLY_SK}})
+    item = resp.get("Item")
+    return _deserialize(item) if item else None
 
 
 def _list_partition(gsi1pk: str, limit: int) -> list[dict]:

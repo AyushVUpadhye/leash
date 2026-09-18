@@ -40,6 +40,7 @@ def set_context(incident_id: str, alarm_name: str = "") -> None:
     """Called by the handler once per invocation before the agent runs."""
     _CTX["incident_id"] = incident_id
     _CTX["alarm_name"] = alarm_name
+    authz.set_audit_context(incident_id, alarm_name)
 
 
 AUDIT_FAILED = " (audit write FAILED)"
@@ -66,8 +67,15 @@ def _decide(action: str, rtype: str, rid: str, env: str, context: dict | None = 
 
 
 def _audit(action: str, rtype: str, rid: str, env: str, decision, result: str, summary: str = "") -> bool:
-    """Write the audit row; returns False (and logs) if it could not be written."""
+    """Write the audit row; returns False (and logs) if it could not be written.
+
+    When the authorizer service already wrote the row (decision.audit_ref), only the result is
+    filled in - the decision itself was recorded before this process could act on it."""
     try:
+        ref = getattr(decision, "audit_ref", None)
+        if ref:
+            audit.update_result(ref, result)
+            return True
         audit.write_audit(
             incident_id=_CTX["incident_id"],
             action=action,
