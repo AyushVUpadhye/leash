@@ -33,6 +33,16 @@ Gateway and S3 give the audit trail somewhere to live. IAM sits underneath Cedar
 independent floor with explicit denies on every destructive API. One SAM template deploys all of
 it, including the deliberately breakable infrastructure, and one script tears it down.
 
+## Two ways to run it
+
+The same code runs in two places. On AWS, `sam deploy` brings up the agent Lambda, the Verified
+Permissions policy store, the audit table, the API, the dashboard and the deliberately breakable
+dev infrastructure. On a laptop with no AWS account, `local_demo/` runs the identical agent,
+tools, Cedar policies (evaluated with cedarpy against the same `.cedar` files that the SAM
+template deploys) and dashboard, with a local Ollama model in place of Bedrock and AWS itself
+replaced by an in-memory simulation that answers the exact same boto3 calls. Every audit row
+in the demo, allowed or denied, comes from a real Cedar decision on the real policy text.
+
 ## AI tools used
 
 Claude Code (Claude Fable 5.1) was used to scaffold and review the code. All architecture
