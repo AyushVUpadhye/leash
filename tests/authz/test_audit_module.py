@@ -64,7 +64,7 @@ def test_list_audit_queries_gsi_newest_first(ddb):
     rows = audit.list_audit(limit=2)
     q = ddb.queries[0]
     assert q["IndexName"] == "gsi1" and q["ScanIndexForward"] is False and q["Limit"] == 2
-    assert q["ExpressionAttributeValues"] == {":all": {"S": "ALL"}}
+    assert q["ExpressionAttributeValues"] == {":pk": {"S": "ALL"}}
     assert rows[0] == {"pk": "inc-2", "sk": "2026-09-18T03:12:08.000001Z", "decision": "DENY", "policy_ids": ["ForbidProd"]}
     assert rows[1]["policy_ids"] == []
 

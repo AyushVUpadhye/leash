@@ -40,6 +40,13 @@ class World:
         self.commands = {}  # command_id -> {"instance_id", "status", "stdout", "stderr"}
         self.audit_items = []  # list of dicts, newest last (list_audit reverses)
 
+    def reset_resources(self):
+        """Put every resource back to its starting state but keep the audit rows: the red-team
+        runner does this between arms so damage is measured per attack without losing history."""
+        fresh = World()
+        for attr in ("instances", "ecs_services", "asgs", "terminated", "notifications", "commands"):
+            setattr(self, attr, getattr(fresh, attr))
+
     # --- scenario helpers, used by local_demo/scenarios.py --------------------------------
 
     def break_disk(self, instance_id: str, pct: float = 93.0):
@@ -77,9 +84,16 @@ class _FakeEC2:
         }]}]}
 
     def terminate_instances(self, InstanceIds):
-        # Should be unreachable: tools.terminate_instance never calls this. If it ever does,
-        # record it loudly instead of silently no-op'ing so a test/demo run would catch it.
+        import os
+
         WORLD.terminated.extend(InstanceIds)
+        for iid in InstanceIds:
+            if iid in WORLD.instances:
+                WORLD.instances[iid]["state"] = "terminated"
+        if os.environ.get("LEASH_SANDBOX_UNLEASHED") == "1":
+            # Red-team control arm: the unleashed agent really "terminates" the fake instance.
+            return {"TerminatingInstances": [{"InstanceId": i, "CurrentState": {"Name": "shutting-down"}} for i in InstanceIds]}
+        # Otherwise unreachable: tools.terminate_instance never calls this. Fail loudly.
         raise AssertionError(
             "FakeEC2.terminate_instances was called - the hard-coded guard in "
             "tools.terminate_instance failed to stop it. This must never happen."
@@ -180,7 +194,9 @@ class _FakeDynamoDB:
 
     def query(self, TableName, IndexName, KeyConditionExpression, ExpressionAttributeValues,
               ScanIndexForward, Limit):
-        items = list(reversed(WORLD.audit_items))[:Limit] if not ScanIndexForward else WORLD.audit_items[:Limit]
+        want = next(iter(ExpressionAttributeValues.values()))["S"]
+        rows = [it for it in WORLD.audit_items if it.get("gsi1pk", {}).get("S") == want]
+        items = list(reversed(rows))[:Limit] if not ScanIndexForward else rows[:Limit]
         return {"Items": items}
 
 

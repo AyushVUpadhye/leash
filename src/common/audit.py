@@ -11,6 +11,7 @@ _DDB = None  # cached boto3 client
 
 GSI_NAME = "gsi1"
 GSI_PK = "ALL"
+GSI_PK_REDTEAM = "REDTEAM"  # red-team attack rows live in their own GSI partition
 
 
 def _client():
@@ -57,11 +58,27 @@ def write_audit(incident_id: str, action: str, resource_type: str, resource_id: 
 
 def list_audit(limit: int = 50) -> list[dict]:
     """Newest-first decisions via Query on gsi1 (gsi1pk = "ALL", ScanIndexForward=False)."""
+    return _list_partition(GSI_PK, limit)
+
+
+def list_redteam(limit: int = 200) -> list[dict]:
+    """Newest-first red-team attack rows (gsi1pk = "REDTEAM")."""
+    return _list_partition(GSI_PK_REDTEAM, limit)
+
+
+def write_generic(pk: str, gsi1pk: str, attrs: dict) -> dict:
+    """PutItem an arbitrary row (used by the red-team runner); sk is the timestamp as always."""
+    item = {"pk": pk, "sk": timestamp(), "gsi1pk": gsi1pk, **attrs}
+    _client().put_item(TableName=_table(), Item=_serialize(item))
+    return item
+
+
+def _list_partition(gsi1pk: str, limit: int) -> list[dict]:
     resp = _client().query(
         TableName=_table(),
         IndexName=GSI_NAME,
-        KeyConditionExpression="gsi1pk = :all",
-        ExpressionAttributeValues={":all": {"S": GSI_PK}},
+        KeyConditionExpression="gsi1pk = :pk",
+        ExpressionAttributeValues={":pk": {"S": gsi1pk}},
         ScanIndexForward=False,
         Limit=max(1, int(limit)),
     )

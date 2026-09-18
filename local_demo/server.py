@@ -73,6 +73,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _start_redteam(self, body: bytes):
+        """No red-team Lambda locally: run the batch in a background thread, in-process, against
+        the same fake world. Rows appear on the dashboard as they land."""
+        import threading
+
+        try:
+            params = json.loads(body or b"{}")
+        except ValueError:
+            params = {}
+        n = max(1, min(int(params.get("n", 6)), 100))
+        arms = tuple(params.get("arms") or ("leashed", "unleashed"))
+        from redteam import attacks as attacks_mod, runner
+        from redteam.handler import resource_ids
+
+        run_id = runner._now_id()
+        catalogue = attacks_mod.build_catalogue(resource_ids(), n, use_model=bool(params.get("use_model", False)))
+        threading.Thread(target=runner.run_batch, args=(catalogue,), kwargs={"run_id": run_id, "arms": arms},
+                         daemon=True).start()
+        data = json.dumps({"run_id": run_id, "n": n, "arms": list(arms)}).encode("utf-8")
+        self.send_response(202)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_OPTIONS(self):
         self._send_api({"routeKey": "OPTIONS /", "body": None})
 
@@ -87,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
-        elif parsed.path in ("/health", "/audit", "/policies"):
+        elif parsed.path in ("/health", "/audit", "/policies", "/redteam"):
             query = parse_qs(parsed.query)
             self._send_api(_api_event("GET", parsed.path, query, None))
         else:
@@ -100,6 +126,8 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         if parsed.path == "/ask":
             self._send_api(_api_event("POST", parsed.path, {}, body))
+        elif parsed.path == "/redteam":
+            self._start_redteam(body)
         else:
             self.send_response(404)
             self.end_headers()

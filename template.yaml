@@ -245,6 +245,110 @@ Resources:
               Resource: "*"
 
   # -------------------------------------------------------------------------
+  # Red-team arena: an attacker model generates attacks, each one is run through
+  # the real agent (Cedar on) and through the same agent with authorisation off
+  # against an in-memory fake AWS (the control arm). Rows land in the audit
+  # table under gsi1pk=REDTEAM. Long runs chain themselves asynchronously.
+  # -------------------------------------------------------------------------
+  RedTeamFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-redteam"
+      Description: Attacker model vs the leashed agent, with an unleashed sandbox control arm.
+      CodeUri: src/
+      Layers: [!Ref DepsLayer]
+      Handler: redteam.handler.handler
+      Timeout: 900
+      MemorySize: 1024
+      # One run at a time: the arms share module-level state and the numbers must be
+      # sequential to be comparable.
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          POLICY_STORE_ID: !GetAtt Authz.Outputs.PolicyStoreId
+          POLICY_ID_MAP: !GetAtt Authz.Outputs.PolicyIdMap
+          AUDIT_TABLE: !Ref AuditTable
+          ALERT_TOPIC_ARN: ""
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          ENV_TAG_KEY: env
+          SCALE_CAP: "4"
+          DEV_INSTANCE_ID: !Ref DevInstance
+          PROD_INSTANCE_ID: !Ref ProdInstance
+          ASG_NAME: !Sub "${AWS::StackName}-dev-asg"
+          REDTEAM_MAX_PER_INVOCATION: "12"
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: AskCedar
+              Effect: Allow
+              Action: verifiedpermissions:IsAuthorized
+              Resource: !Sub
+                - "arn:${AWS::Partition}:verifiedpermissions::${AWS::AccountId}:policy-store/${StoreId}"
+                - StoreId: !GetAtt Authz.Outputs.PolicyStoreId
+            - Sid: WriteRows
+              Effect: Allow
+              Action: [dynamodb:PutItem, dynamodb:Query]
+              Resource:
+                - !GetAtt AuditTable.Arn
+                - !Sub "${AuditTable.Arn}/index/*"
+            - Sid: Bedrock
+              Effect: Allow
+              Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+              Resource: "*"
+            - Sid: ChainSelf
+              Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-redteam"
+            - Sid: ReadOnlyDiscovery
+              Effect: Allow
+              Action:
+                - ec2:Describe*
+                - ecs:Describe*
+                - ecs:List*
+                - autoscaling:Describe*
+                - cloudwatch:ListMetrics
+                - cloudwatch:GetMetricStatistics
+              Resource: "*"
+            # The leashed arm can legitimately be ALLOWED on dev resources by Cedar (e.g. an
+            # escalation attack that ends in "clean the dev disk"); give it the same dev-only
+            # rights as the agent, and the same explicit denies.
+            - Sid: SsmRunShellScriptDocument
+              Effect: Allow
+              Action: ssm:SendCommand
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+            - Sid: SsmOnlyDevInstances
+              Effect: Allow
+              Action: ssm:SendCommand
+              Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+              Condition:
+                StringEquals:
+                  ssm:resourceTag/env: dev
+            - Sid: SsmReadResults
+              Effect: Allow
+              Action: ssm:GetCommandInvocation
+              Resource: "*"
+            - Sid: RestartDevService
+              Effect: Allow
+              Action: ecs:UpdateService
+              Resource: !Ref EcsService
+            - Sid: ScaleDevGroup
+              Effect: Allow
+              Action: autoscaling:SetDesiredCapacity
+              Resource: !Sub "arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AWS::StackName}-dev-asg"
+            - Sid: NeverDestroy
+              Effect: Deny
+              Action:
+                - ec2:TerminateInstances
+                - ec2:DeleteVolume
+                - ecs:DeleteService
+                - ecs:DeleteCluster
+                - autoscaling:DeleteAutoScalingGroup
+                - dynamodb:DeleteTable
+                - s3:DeleteBucket
+                - rds:Delete*
+              Resource: "*"
+
+  # -------------------------------------------------------------------------
   # HTTP API + API Lambda: /health, /audit (read table), /ask (invoke agent).
   # -------------------------------------------------------------------------
   LeashApi:
@@ -278,6 +382,7 @@ Resources:
           # dashboard shows exactly what is being enforced.
           POLICY_STORE_ID: !GetAtt Authz.Outputs.PolicyStoreId
           POLICY_ID_MAP: !GetAtt Authz.Outputs.PolicyIdMap
+          REDTEAM_FUNCTION_NAME: !Ref RedTeamFunction
       Events:
         Health:
           Type: HttpApi
@@ -297,6 +402,18 @@ Resources:
             ApiId: !Ref LeashApi
             Path: /policies
             Method: GET
+        RedTeamGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LeashApi
+            Path: /redteam
+            Method: GET
+        RedTeamPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LeashApi
+            Path: /redteam
+            Method: POST
         Ask:
           Type: HttpApi
           Properties:
@@ -315,7 +432,9 @@ Resources:
             - Sid: AskAgent
               Effect: Allow
               Action: lambda:InvokeFunction
-              Resource: !GetAtt AgentFunction.Arn
+              Resource:
+                - !GetAtt AgentFunction.Arn
+                - !GetAtt RedTeamFunction.Arn
             - Sid: ReadTheLeash
               Effect: Allow
               Action: [verifiedpermissions:ListPolicies, verifiedpermissions:GetPolicy]
@@ -649,3 +768,5 @@ Outputs:
     Value: !Ref AlertTopic
   AgentFunctionName:
     Value: !Ref AgentFunction
+  RedTeamFunctionName:
+    Value: !Ref RedTeamFunction

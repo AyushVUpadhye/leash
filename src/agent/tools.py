@@ -45,6 +45,26 @@ def set_context(incident_id: str, alarm_name: str = "") -> None:
 AUDIT_FAILED = " (audit write FAILED)"
 
 
+def _sandbox_unleashed() -> bool:
+    """True only for the red-team control arm: LEASH_SANDBOX_UNLEASHED=1 AND the boto3 seam is
+    the in-memory fake from local_demo/. With real clients installed the flag is ignored, so
+    this can never switch authorisation off against a real account."""
+    if os.environ.get("LEASH_SANDBOX_UNLEASHED") != "1":
+        return False
+    try:
+        from local_demo import fake_aws
+    except ImportError:
+        return False
+    return aws.client is fake_aws.fake_client
+
+
+def _decide(action: str, rtype: str, rid: str, env: str, context: dict | None = None):
+    """Cedar decides - except in the sandboxed control arm, where nothing is checked."""
+    if _sandbox_unleashed():
+        return authz.Decision(allowed=True, policy_ids=["UNLEASHED-SANDBOX"], reason="no authorisation (control arm)")
+    return authz.authorize(action, rtype, rid, env, context)
+
+
 def _audit(action: str, rtype: str, rid: str, env: str, decision, result: str, summary: str = "") -> bool:
     """Write the audit row; returns False (and logs) if it could not be written."""
     try:
@@ -139,7 +159,7 @@ def clean_disk(instance_id: str) -> str:
         instance_id: EC2 instance id
     """
     env = aws.instance_env(instance_id)
-    decision = authz.authorize("cleanDisk", "Instance", instance_id, env)
+    decision = _decide("cleanDisk", "Instance", instance_id, env)
     if not decision.allowed:
         ok = _audit("cleanDisk", "Instance", instance_id, env, decision, "skipped (denied)")
         return _denied("cleanDisk", instance_id, env, decision, ok)
@@ -164,7 +184,7 @@ def restart_service(cluster: str, service: str) -> str:
     """
     rid = f"{cluster}/{service}"
     env = aws.service_env(cluster, service)
-    decision = authz.authorize("restartService", "EcsService", rid, env)
+    decision = _decide("restartService", "EcsService", rid, env)
     if not decision.allowed:
         ok = _audit("restartService", "EcsService", rid, env, decision, "skipped (denied)")
         return _denied("restartService", rid, env, decision, ok)
@@ -190,7 +210,7 @@ def scale_group(asg_name: str, desired_capacity: int) -> str:
     """
     env = aws.asg_env(asg_name)
     context = {"desiredCapacity": int(desired_capacity)}
-    decision = authz.authorize("scaleGroup", "AutoScalingGroup", asg_name, env, context)
+    decision = _decide("scaleGroup", "AutoScalingGroup", asg_name, env, context)
     if not decision.allowed:
         ok = _audit("scaleGroup", "AutoScalingGroup", asg_name, env, decision, f"skipped (denied) desired={desired_capacity}")
         return _denied("scaleGroup", asg_name, env, decision, ok) + f" (requested desiredCapacity={desired_capacity})"
@@ -214,10 +234,17 @@ def terminate_instance(instance_id: str) -> str:
         instance_id: EC2 instance id
     """
     env = aws.instance_env(instance_id)
-    decision = authz.authorize("terminateInstance", "Instance", instance_id, env)
+    decision = _decide("terminateInstance", "Instance", instance_id, env)
     if not decision.allowed:
         ok = _audit("terminateInstance", "Instance", instance_id, env, decision, "skipped (denied)")
         return _denied("terminateInstance", instance_id, env, decision, ok)
+    if _sandbox_unleashed():
+        # Control arm only (fake EC2): show what an agent without the guard would have done.
+        aws.client("ec2").terminate_instances(InstanceIds=[instance_id])
+        result = "terminated (UNLEASHED SANDBOX - fake EC2, control arm)"
+        ok = _audit("terminateInstance", "Instance", instance_id, env, decision, result)
+        text = f"ALLOWED by UNLEASHED-SANDBOX: terminateInstance on {instance_id} -> {result}"
+        return text if ok else text + AUDIT_FAILED
     # Defence in depth: never call ec2.terminate_instances from this code path, whatever Cedar said.
     result = "refused by hard-coded guard"
     ok = _audit("terminateInstance", "Instance", instance_id, env, decision, result)
