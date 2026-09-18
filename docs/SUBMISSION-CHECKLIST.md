@@ -35,8 +35,10 @@ schedule page and the form closes hard.
 
 ## Ship It track specifics
 
-- Live URL: the `DashboardUrl` stack output. Keep the stack up through judging; run
-  `scripts/stop-prod.sh` after deploy so the prod decoy costs nothing.
+- Live URL: http://leash-dashboard-431578779465-us-east-1.s3-website-us-east-1.amazonaws.com
+  (API https://zjebhhtr9h.execute-api.us-east-1.amazonaws.com). Keep the stack up through
+  judging; the prod decoy is stopped. The brain must be running (`local_demo/cloud_worker.py`)
+  for the Ask box and alarms to be answered; the audit trail and policies are served regardless.
 - Cost guard: the HTTP API is throttled (5 req/s, burst 10); the agent role has explicit denies on
   every delete API; tear down with `scripts/teardown.sh` once results are announced.
 
