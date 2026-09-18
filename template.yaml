@@ -861,7 +861,9 @@ Resources:
         - Name: fstype
           Value: !Ref DiskFstype
       Statistic: Maximum
-      Period: 10
+      # The agent publishes every 10 s but not in every 10 s slot; a 10 s alarm period
+      # flaps OK/ALARM on the gaps and spawns duplicate incidents. 60 s is steady.
+      Period: 60
       EvaluationPeriods: 1
       DatapointsToAlarm: 1
       Threshold: 85
@@ -872,20 +874,32 @@ Resources:
     Properties:
       AlarmName: leash-ecs-dev
       AlarmDescription: leash-api-dev has fewer than 1 running task.
-      Namespace: ECS/ContainerInsights
-      MetricName: RunningTaskCount
-      Dimensions:
-        - Name: ClusterName
-          Value: !Ref EcsCluster
-        - Name: ServiceName
-          Value: !GetAtt EcsService.Name
-      Statistic: Minimum
-      Period: 60
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
+      # Container Insights stops publishing RunningTaskCount when the service has no
+      # tasks at all, which is exactly the case we care about. FILL(...) turns that gap
+      # into 0 so the alarm fires instead of sitting on "insufficient data".
+      Metrics:
+        - Id: running
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ECS/ContainerInsights
+              MetricName: RunningTaskCount
+              Dimensions:
+                - Name: ClusterName
+                  Value: !Ref EcsCluster
+                - Name: ServiceName
+                  Value: !GetAtt EcsService.Name
+            Period: 60
+            Stat: Minimum
+        - Id: running_or_zero
+          Expression: FILL(running, 0)
+          Label: running tasks (gap = 0)
+          ReturnData: true
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
       Threshold: 1
       ComparisonOperator: LessThanThreshold
-      TreatMissingData: notBreaching
+      TreatMissingData: breaching
 
 # ---------------------------------------------------------------------------
 # Outputs (scripts/*.sh and local_demo/cloud_worker.py read these)
