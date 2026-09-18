@@ -6,3 +6,4 @@ node_modules/
 dashboard/config.js
 .pytest_cache/
 .build/
+local_demo_run.log
