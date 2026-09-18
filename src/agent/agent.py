@@ -50,6 +50,7 @@ def build_agent(incident_id: str) -> Agent:
             host=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
             model_id=os.environ.get("OLLAMA_MODEL_ID", DEFAULT_LOCAL_MODEL_ID),
             max_tokens=2048,
+            temperature=0.0,  # greedy decoding: same input -> same tool calls, so the demo is repeatable
         )
     else:
         model = BedrockModel(

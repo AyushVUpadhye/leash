@@ -148,8 +148,11 @@ def _retry_nudge(original: str) -> str:
     )
 
 
+MAX_RETRIES = 2
+
+
 def _run_agent(agent, prompt: str, original: str = "", require_mutation: bool = False) -> str:
-    """Run the agent; retry once if it did not act.
+    """Run the agent; retry up to MAX_RETRIES times if it did not act.
 
     "Did not act" means no tool call at all, or - for human requests (require_mutation) - no
     mutating tool call. Small local models sometimes narrate a call as text, or refuse on their
@@ -157,10 +160,12 @@ def _run_agent(agent, prompt: str, original: str = "", require_mutation: bool = 
     audited, which defeats the point. Checking the message history is model-agnostic.
     """
     reply = str(agent(prompt)).strip()
-    used = _tools_used(agent)
-    acted = bool(used & MUTATING_TOOLS) if require_mutation else bool(used)
-    if not acted:
-        log.warning("model did not act (tools used: %s); retrying once", sorted(used))
+    for attempt in range(1, MAX_RETRIES + 1):
+        used = _tools_used(agent)
+        acted = bool(used & MUTATING_TOOLS) if require_mutation else bool(used)
+        if acted:
+            break
+        log.warning("model did not act (tools used: %s); retry %d/%d", sorted(used), attempt, MAX_RETRIES)
         reply = str(agent(_retry_nudge(original or prompt))).strip()
     return reply
 
