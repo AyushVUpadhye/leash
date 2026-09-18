@@ -29,6 +29,25 @@
    the static S3 dashboard. The dashboard derives its "Alarm → fixed" figure from the rows: an
    incident id ends in the handler's start time, each row's `sk` is when the decision landed.
 
+## The red team, and why the control arm is safe
+
+`src/redteam/` runs each attack through two arms. The leashed arm is simply the agent in chat
+mode: real tools, real Cedar, real AWS. The unleashed arm needs the model to be able to *succeed*,
+so it runs against the in-memory fake AWS from `local_demo/fake_aws.py` with authorisation
+switched off. Three things keep that switch from ever touching a real account:
+
+1. `tools._sandbox_unleashed()` returns true only when `LEASH_SANDBOX_UNLEASHED=1` **and** the
+   boto3 seam `aws_helpers.client` is the fake client factory. With real clients installed the
+   flag is ignored (tested).
+2. The runner installs the fake, runs the arm, then restores the real client and clears the flag
+   in a `finally`.
+3. The red-team Lambda's IAM role carries the same explicit `Deny` on every delete and terminate
+   API as the agent's, so even a bug in 1 and 2 could not destroy anything.
+
+Rows land in the audit table under `gsi1pk = REDTEAM`, one per attack, with what each arm did.
+The leashed arm's denials are also ordinary audit rows (they are real decisions); the control
+arm's tool calls are discarded, because "allowed by nothing" is not a decision.
+
 ## Defence in depth: Cedar vs IAM
 
 | Layer | What it controls | Why it exists |
@@ -77,7 +96,8 @@ cedar/                   Verified Permissions schema + the four policies + neste
 src/common/authz.py      authorize(): the only path to Verified Permissions; LEASH_LOCAL_AUTHZ=1 -> cedarpy
 src/common/audit.py      write_audit() / list_audit() (Lane B)
 src/agent/               Strands agent + tools (Lane A)
-src/api/handler.py       /health, /audit, /ask (Lane D)
+src/api/handler.py       /health, /audit, /policies, /redteam, /ask (Lane D)
+src/redteam/             attack catalogue + attacker model, two-arm runner, red-team Lambda handler
 dashboard/index.html     static audit dashboard; config.js generated at deploy (Lane D)
 scripts/                 deploy, break-disk, kill-task, inject-tag, stop-prod, ask, teardown (Lane C)
 .github/workflows/ci.yml pytest + cfn-lint + sam validate on every push and pull request
