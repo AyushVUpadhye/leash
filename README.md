@@ -149,6 +149,11 @@ Parameters asked on first deploy: `AlertEmail` (confirm the SNS subscription ema
 `SubnetId` (your default VPC is fine), optional `KeyName`, `Brain` (`worker` or `bedrock`),
 `PolicyStore` (`s3` or `avp`) and `BedrockModelId`. Tear down with `scripts/teardown.sh`.
 
+Updating a running stack: `LatestAmiId` resolves the newest Amazon Linux image at deploy time, so a
+later update can try to replace the EC2 instances. Pin it first (an SSM parameter holding the AMI
+the instances already run) and pass `LatestAmiId=/leash/pinned-ami`; review the change set's
+Replacement column before executing.
+
 With `Brain=worker` (the default), start the brain on any machine with AWS credentials and a
 model. Everything it touches is real; only the model is local:
 
