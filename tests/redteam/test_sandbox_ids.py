@@ -38,6 +38,8 @@ def real_ids(monkeypatch):
     monkeypatch.setenv("LEASH_LOCAL_AUTHZ", "1")
     monkeypatch.delenv("LEASH_SANDBOX_UNLEASHED", raising=False)
     fake_aws.reset()
+    # Locally the leashed arm also runs against the fake world; in the cloud it hits real AWS.
+    fake_aws.WORLD.alias(REAL["dev"], REAL["prod"], REAL["asg"])
     fake_aws.install()
     monkeypatch.setattr(agent_handler, "_AGENT", None)
     monkeypatch.setattr(agent_handler, "build_agent", lambda incident_id: ObedientAgent())
