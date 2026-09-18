@@ -1,5 +1,20 @@
 # Leash — architecture notes
 
+## Two shapes, one code path
+
+| | `Brain=worker`, `PolicyStore=s3` (default, Free plan) | `Brain=bedrock`, `PolicyStore=avp` |
+| --- | --- | --- |
+| Where the model runs | any machine running `local_demo/cloud_worker.py` (Ollama, or Bedrock if the account has it) | the agent Lambda on Bedrock |
+| How alarms reach it | EventBridge -> SQS `leash-incidents` -> worker | EventBridge -> Lambda |
+| How `/ask` reaches it | API -> SQS `leash-requests` -> worker; reply via `GET /reply` | API invokes the Lambda synchronously |
+| Who evaluates Cedar | the authorizer Lambda, cedarpy, policies from the versioned S3 bucket | Amazon Verified Permissions |
+| Who writes the audit row | the authorizer, **before** it answers | the tool, after acting |
+| What the agent process can do | act on dev resources; cannot read policies, cannot write audit rows | same, plus IAM denies on every delete API |
+
+The second column is stricter on one axis (IAM floor in Lambda), the first is stricter on
+another (the audit cannot be skipped by the acting process). Both are real, both are tested, and
+`src/agent` does not know which one it is running in.
+
 ## Flow, end to end
 
 1. A CloudWatch alarm (`leash-disk-dev`, `leash-ecs-dev`) enters ALARM.
@@ -84,7 +99,7 @@ GSI `gsi1`: `gsi1pk = "ALL"`, `sk` — a single-partition index that gives "newe
 | Env attribute read from tags at call time, trusted as-is. | Tags enforced by SCP / tag policies so a resource cannot "become dev" by retagging. |
 | One agent, one principal `Leash::Agent::"leash"`. | One principal per agent instance or per team, with Cedar policies per principal and a policy template per environment. |
 | Prod instance is created running and stopped by a script. | Prod resources live in a different account; Leash gets no credentials there at all. |
-| Audit rows written by the Lambda that also acts. | Write audit from `authorize()` itself, or forward Verified Permissions' own CloudTrail events, so the record cannot be skipped by tool code. |
+| Audit rows written by the Lambda that also acts (AVP mode). | Done in the default shape: the authorizer Lambda writes the row before answering. For AVP mode, forward Verified Permissions' own CloudTrail events. |
 | No retries / idempotency on incidents. | Idempotency key per alarm transition; cooldown per resource so a flapping alarm cannot cause repeated remediation. |
 | Haiku-class model, short prompt, no memory between incidents. | Keep it small: the value is in the policies, not in the model. Add a runbook store if incident types multiply. |
 
@@ -96,7 +111,9 @@ cedar/                   Verified Permissions schema + the four policies + neste
 src/common/authz.py      authorize(): the only path to Verified Permissions; LEASH_LOCAL_AUTHZ=1 -> cedarpy
 src/common/audit.py      write_audit() / list_audit() (Lane B)
 src/agent/               Strands agent + tools (Lane A)
-src/api/handler.py       /health, /audit, /policies, /redteam, /ask (Lane D)
+src/authz_service/       the leash as a service: Cedar from S3, audit row first (Free-plan default)
+local_demo/cloud_worker.py  the brain on any machine: SQS in, real AWS out, authorizer for every decision
+src/api/handler.py       /health, /audit, /policies, /redteam, /ask, /reply (Lane D)
 src/redteam/             attack catalogue + attacker model, two-arm runner, red-team Lambda handler
 dashboard/index.html     static audit dashboard; config.js generated at deploy (Lane D)
 scripts/                 deploy, break-disk, kill-task, inject-tag, stop-prod, ask, teardown (Lane C)
