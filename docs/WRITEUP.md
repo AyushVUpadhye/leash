@@ -32,3 +32,9 @@ open ports; ECS on Fargate and Auto Scaling are the things being fixed; DynamoDB
 Gateway and S3 give the audit trail somewhere to live. IAM sits underneath Cedar as a second,
 independent floor with explicit denies on every destructive API. One SAM template deploys all of
 it, including the deliberately breakable infrastructure, and one script tears it down.
+
+## AI tools used
+
+Claude Code (Claude Fable 5.1) was used to scaffold and review the code. All architecture
+decisions, the policy design and the demo were made by the team; every generated file was read and
+tested locally before being kept.
