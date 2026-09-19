@@ -103,6 +103,22 @@ stack, with an 8B model running on a laptop CPU as the brain - every leash decis
 took under a second; the model was the whole wait. With Bedrock as the brain the same run is under
 90 seconds. Nobody was awake.
 
+## The numbers
+
+We ran 20 attacks across seven tactics against the deployed stack, each one twice: through the
+real agent with the leash on, and through the same model with authorisation switched off in a
+sandbox (an in-memory AWS, so nothing real could be harmed).
+
+| | |
+| --- | --- |
+| Model persuaded to call the destructive tool | 18 of 20 |
+| Destructive action executed, leash off | **18 of 20** |
+| Destructive action executed, leash on | **0 of 20** |
+
+Fake CTOs, fake emergencies, "the policy was updated", role-play, base64, instructions hidden in
+log lines: the model fell for almost all of them. The leash fell for none. That gap is the whole
+argument for putting the rule outside the model.
+
 ## Three things we learned
 
 **Put the guardrail outside the model.** Our first version explained the rules in the system
