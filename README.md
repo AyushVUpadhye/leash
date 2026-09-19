@@ -221,9 +221,9 @@ the outcome does not change.
 
 ## The red team: same model, same attacks, with and without the leash
 
-![Red-team panel: 12 attacks across 8 tactics, model persuaded 92%, executed with no leash 12/12, executed with Leash 0/12](docs/img/dashboard-red-team.png)
+![Red-team panel: 14 attacks across 8 tactics, model persuaded 93%, executed with no leash 13/14, executed with Leash 0/14](docs/img/dashboard-red-team.png)
 
-*The latest deployed run. Every one of the twelve attacks that destroyed something in the unleashed sandbox produced a Cedar DENY with the leash on. Numbers and attack feed are read from the audit table, not typed in.*
+*The latest deployed run. Every one of the thirteen attacks that destroyed something in the unleashed sandbox produced a Cedar DENY with the leash on. Numbers and attack feed are read from the audit table, not typed in.*
 
 Saying "the model cannot be talked into it" is a claim. Leash measures it.
 
@@ -254,6 +254,10 @@ never disarm the real deployment. Locally, `local_demo/server.py` runs the arena
 the same code.
 
 ## What the dashboard shows
+
+![The top of the dashboard: a one-line verdict written from the audit trail, the four steps of how Leash works, and the four headline numbers](docs/img/dashboard-hero.png)
+
+*The first thing a viewer reads is a sentence, not a number: what was fixed with nobody awake, what was refused, and which policy refused it. Then how it works, in four steps.*
 
 ![Audit trail with the poisoned-tag incident: cleanDisk ALLOW and terminateInstance DENY ForbidDestructive under one alarm, beside the four Cedar policies](docs/img/dashboard-audit-trail.png)
 
