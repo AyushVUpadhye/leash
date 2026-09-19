@@ -162,9 +162,21 @@ ollama pull qwen3:8b && ollama serve                  # or any tool-capable mode
 PYTHONPATH=src python local_demo/cloud_worker.py      # polls the two queues, runs the agent
 ```
 
-It prints every incident and request it handles. Alarms fire the same way as in Bedrock mode;
-the dashboard's Ask box and "Run 20 attacks" go through the request queue and the reply comes
-back through `GET /reply`.
+It prints every incident and request it handles, and writes a heartbeat so the dashboard header
+shows **brain online** (model and host) or **brain offline**. Alarms fire the same way as in
+Bedrock mode; the dashboard's Ask box and "Run 20 attacks" go through the request queue and the
+reply comes back through `GET /reply`. Run it under the stack's least-privilege policy
+(`WorkerPolicyArn` output): it can consume the two queues, ask the authorizer, write replies and
+results, act on `env=dev` resources, and nothing else; every delete API is explicitly denied.
+
+Two more things the deployed shape gives you:
+
+- **Live policy edits.** `scripts/set-cap.sh 2` validates a new `ForbidScaleAboveCap` against the
+  schema with cedarpy and uploads it to the versioned policy bucket. The authorizer picks it up on
+  the next decision, the dashboard's version badge changes, and "scale to 3" is now denied. No
+  redeploy, no restart, and every previous version is one `list-object-versions` away.
+- **One remediation per alarm transition.** A flapping alarm can deliver the same event many
+  times; the agent ignores repeats of the same alarm for ten minutes after handling one.
 
 Run the tests locally (no AWS account needed; the Cedar policies are evaluated for real with
 [cedarpy](https://pypi.org/project/cedarpy/), and every boto3 client is faked). The same commands

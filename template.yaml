@@ -236,6 +236,87 @@ Resources:
       Targets:
         - Id: incidents
           Arn: !GetAtt IncidentQueue.Arn
+  # What the brain is allowed to do, and nothing more. Attach to the IAM user or role
+  # the worker runs under (README "Run the brain"). No policy read, no audit write of
+  # decisions (the authorizer does that), and an explicit Deny on every delete API.
+  WorkerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: UseWorker
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-worker"
+      Description: Least privilege for the Leash worker (the brain). Cedar decisions come from the authorizer.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadStackOutputs
+            Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Sub "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+          - Sid: ConsumeQueues
+            Effect: Allow
+            Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:GetQueueUrl]
+            Resource: [!GetAtt IncidentQueue.Arn, !GetAtt RequestQueue.Arn]
+          - Sid: AskTheLeash
+            Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !If [UseS3Policies, !GetAtt AuthzFunction.Arn, !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-authz"]
+          - Sid: RepliesResultsHeartbeat
+            Effect: Allow
+            Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:GetItem, dynamodb:Query]
+            Resource:
+              - !GetAtt AuditTable.Arn
+              - !Sub "${AuditTable.Arn}/index/*"
+          - Sid: Notify
+            Effect: Allow
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+          - Sid: SsmRunShellScriptDocument
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+          - Sid: SsmOnlyDevInstances
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                ssm:resourceTag/env: dev
+          - Sid: SsmReadResults
+            Effect: Allow
+            Action: ssm:GetCommandInvocation
+            Resource: "*"
+          - Sid: ReadOnlyDiscovery
+            Effect: Allow
+            Action:
+              - ec2:Describe*
+              - ecs:Describe*
+              - ecs:List*
+              - autoscaling:Describe*
+              - cloudwatch:ListMetrics
+              - cloudwatch:GetMetricStatistics
+            Resource: "*"
+          - Sid: RestartDevService
+            Effect: Allow
+            Action: ecs:UpdateService
+            Resource: !Ref EcsService
+          - Sid: ScaleDevGroup
+            Effect: Allow
+            Action: autoscaling:SetDesiredCapacity
+            Resource: !Sub "arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AWS::StackName}-dev-asg"
+          - Sid: NeverDestroy
+            Effect: Deny
+            Action:
+              - ec2:TerminateInstances
+              - ec2:DeleteVolume
+              - ecs:DeleteService
+              - ecs:DeleteCluster
+              - autoscaling:DeleteAutoScalingGroup
+              - dynamodb:DeleteTable
+              - s3:DeleteBucket
+              - s3:DeleteObject
+              - rds:Delete*
+            Resource: "*"
+
   IncidentQueuePolicy:
     Type: AWS::SQS::QueuePolicy
     Condition: UseWorker
@@ -934,6 +1015,10 @@ Outputs:
   RequestQueueUrl:
     Condition: UseWorker
     Value: !Ref RequestQueue
+  WorkerPolicyArn:
+    Condition: UseWorker
+    Description: Attach this managed policy to the IAM user or role the worker runs under.
+    Value: !Ref WorkerPolicy
   AgentFunctionName:
     Condition: UseBedrock
     Value: !Ref AgentFunction
