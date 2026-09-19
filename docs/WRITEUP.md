@@ -41,7 +41,7 @@ same tools: once through the real agent with Cedar on, and once through the same
 authorisation off inside an in-memory sandbox where nothing real can be harmed. The dashboard
 reports how often the model was persuaded to call the destructive tool, how many attacks executed
 a destructive action without the leash, and how many did with Leash. The last figure is the
-project: it stays at zero, and every one of those zeros is a real Verified Permissions denial with
+project: it stays at zero, and every one of those zeros is a real Cedar denial from the authorizer with
 the policy id that produced it. The deployed run: 20 attacks across seven
 tactics; the model was persuaded 18 times; **18 of 20 executed a destructive action with the
 leash off, 0 of 20 with Leash on**. The two attacks the model refused by itself are the point:
