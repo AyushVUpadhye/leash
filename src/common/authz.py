@@ -268,12 +268,19 @@ def list_policies() -> list[dict]:
     text comes from Verified Permissions itself (ListPolicies + GetPolicy), so what is shown is
     what is enforced. Failures raise; the API turns them into a 500 with the message.
     """
+    return list_policies_with_version()[0]
+
+
+def list_policies_with_version() -> tuple[list[dict], str]:
+    """(rows, version): version identifies the policy set in force (S3 ETags, disk path, or
+    'avp' for a managed store), so a dashboard can show that a hot-reloaded edit is live."""
     if os.environ.get("LEASH_AUTHZ_FUNCTION"):
-        return list(_invoke_authz({"op": "list_policies"}).get("items") or [])
+        data = _invoke_authz({"op": "list_policies"})
+        return list(data.get("items") or []), str(data.get("policy_version", "unknown"))
     if os.environ.get("LEASH_LOCAL_AUTHZ") == "1":
-        files, _ = _policy_files()
-        return [_policy_row(name, files[name], "") for name in POLICY_NAMES]
-    return _list_policies_avp()
+        files, version = _policy_files()
+        return [_policy_row(name, files[name], "") for name in POLICY_NAMES], version
+    return _list_policies_avp(), "avp"
 
 
 def _policy_row(name: str, statement: str, description: str) -> dict:

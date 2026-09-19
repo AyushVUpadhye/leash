@@ -187,6 +187,16 @@ def _retry_nudge(original: str) -> str:
 
 MAX_RETRIES = 2
 
+# One remediation per alarm transition: a flapping alarm can deliver the same event many times
+# in a row (seen in production: 29 in ten minutes). Remember when each alarm was last handled.
+_RECENT: dict = {}
+COOLDOWN_S = int(os.environ.get("INCIDENT_COOLDOWN_S", "600"))
+
+
+def _recently_handled(alarm_name: str, now: float) -> bool:
+    last = _RECENT.get(alarm_name)
+    return last is not None and now - last < COOLDOWN_S
+
 
 def _run_agent(agent, prompt: str, original: str = "", require_mutation: bool = False,
                require_tool: str | None = None, dimensions: dict | None = None) -> str:
@@ -244,6 +254,13 @@ def handler(event, context):
         incident_id = f"{_slug(parsed['alarm_name'])}-{ts}"
         if parsed["state"] != "ALARM":
             return {"reply": f"ignored: state {parsed['state']!r} is not ALARM", "incident_id": incident_id}
+        import time as _time
+
+        if _recently_handled(parsed["alarm_name"], _time.time()):
+            log.info("duplicate alarm event for %s within cooldown; skipped", parsed["alarm_name"])
+            return {"reply": f"ignored: {parsed['alarm_name']} was handled less than {COOLDOWN_S} s ago",
+                    "incident_id": incident_id}
+        _RECENT[parsed["alarm_name"]] = _time.time()
         tools.set_context(incident_id, parsed["alarm_name"])
         prompt = build_alarm_prompt(parsed)
     else:

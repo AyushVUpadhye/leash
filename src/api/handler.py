@@ -79,8 +79,31 @@ def _read_body(event: dict):
     return data
 
 
+HEARTBEAT_STALE_S = 90
+
+
 def _health(event: dict) -> dict:
-    return _response(200, {"ok": True})
+    """{"ok": true, "brain": {...}}: in worker mode, whether the brain has been seen recently."""
+    body = {"ok": True}
+    if os.environ.get("REQUEST_QUEUE_URL"):
+        from datetime import datetime, timezone
+
+        from common.audit import read_heartbeat
+
+        brain = {"mode": "worker", "online": False}
+        try:
+            hb = read_heartbeat()
+        except Exception as exc:  # noqa: BLE001 - health must not fail on a missing row
+            hb, brain["error"] = None, str(exc)
+        if hb:
+            seen = datetime.strptime(hb["at"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - seen).total_seconds()
+            brain.update(online=age < HEARTBEAT_STALE_S, seen=hb["at"], age_s=int(age),
+                         model=hb.get("model", ""), host=hb.get("host", ""))
+        body["brain"] = brain
+    else:
+        body["brain"] = {"mode": "bedrock", "online": True}
+    return _response(200, body)
 
 
 def _audit(event: dict) -> dict:
@@ -99,9 +122,10 @@ def _audit(event: dict) -> dict:
 def _policies(event: dict) -> dict:
     """The leash itself: every Cedar policy with its text, read from the same backend that
     enforces it (Verified Permissions in the cloud, the .cedar files in the local demo)."""
-    from common.authz import list_policies
+    from common.authz import list_policies_with_version
 
-    return _response(200, {"items": list_policies()})
+    items, version = list_policies_with_version()
+    return _response(200, {"items": items, "policy_version": version})
 
 
 def _redteam_get(event: dict) -> dict:

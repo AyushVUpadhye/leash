@@ -14,6 +14,7 @@ GSI_PK = "ALL"
 GSI_PK_REDTEAM = "REDTEAM"  # red-team attack rows live in their own GSI partition
 GSI_PK_REPLY = "REPLY"  # agent replies to queued human requests (worker mode)
 REPLY_SK = "reply"
+HEARTBEAT_KEY = ("heartbeat", "worker")  # the brain's liveness row (worker mode)
 
 
 def _client():
@@ -95,6 +96,20 @@ def write_reply(incident_id: str, reply: str) -> dict:
 
 def get_reply(incident_id: str) -> dict | None:
     resp = _client().get_item(TableName=_table(), Key={"pk": {"S": incident_id}, "sk": {"S": REPLY_SK}})
+    item = resp.get("Item")
+    return _deserialize(item) if item else None
+
+
+def write_heartbeat(model: str, host: str) -> dict:
+    """The worker's liveness row, rewritten every few seconds while it polls."""
+    item = {"pk": HEARTBEAT_KEY[0], "sk": HEARTBEAT_KEY[1], "gsi1pk": "HEARTBEAT", "at": timestamp(),
+            "model": model, "host": host}
+    _client().put_item(TableName=_table(), Item=_serialize(item))
+    return item
+
+
+def read_heartbeat() -> dict | None:
+    resp = _client().get_item(TableName=_table(), Key={"pk": {"S": HEARTBEAT_KEY[0]}, "sk": {"S": HEARTBEAT_KEY[1]}})
     item = resp.get("Item")
     return _deserialize(item) if item else None
 

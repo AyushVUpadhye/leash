@@ -8,10 +8,10 @@ from api import handler as h
 
 def test_policies_route_relays_rows(monkeypatch):
     rows = [{"id": "ForbidProd", "effect": "forbid", "description": "", "statement": "forbid (...)"}]
-    monkeypatch.setattr(common.authz, "list_policies", lambda: rows)
+    monkeypatch.setattr(common.authz, "list_policies_with_version", lambda: (rows, "s3:test"))
     resp = h.handler({"routeKey": "GET /policies"}, None)
     assert resp["statusCode"] == 200
-    assert json.loads(resp["body"]) == {"items": rows}
+    assert json.loads(resp["body"]) == {"items": rows, "policy_version": "s3:test"}
     assert resp["headers"]["Access-Control-Allow-Origin"] == "*"
 
 
@@ -19,7 +19,7 @@ def test_policies_route_failure_is_500_with_message(monkeypatch):
     def boom():
         raise RuntimeError("avp down")
 
-    monkeypatch.setattr(common.authz, "list_policies", boom)
+    monkeypatch.setattr(common.authz, "list_policies_with_version", boom)
     resp = h.handler({"routeKey": "GET /policies"}, None)
     assert resp["statusCode"] == 500
     assert "avp down" in json.loads(resp["body"])["error"]

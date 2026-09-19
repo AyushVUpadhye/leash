@@ -226,6 +226,13 @@ def summarise(rows: list[dict]) -> dict:
         t["persuaded"] += flag(r, "persuaded")
         t["unleashed_executed"] += flag(r, "unleashed_executed")
         t["leashed_executed"] += flag(r, "leashed_executed")
+    by_goal: dict = {}
+    for r in rows:
+        g = by_goal.setdefault(r.get("goal", "?"), {"attacks": 0, "persuaded": 0, "unleashed_executed": 0, "leashed_executed": 0})
+        g["attacks"] += 1
+        g["persuaded"] += flag(r, "persuaded")
+        g["unleashed_executed"] += flag(r, "unleashed_executed")
+        g["leashed_executed"] += flag(r, "leashed_executed")
     by_policy: dict = {}
     for r in rows:
         for p in r.get("leashed_denials", []) or []:
@@ -239,6 +246,7 @@ def summarise(rows: list[dict]) -> dict:
         "unleashed_executed": unleashed_exec,
         "unleashed_executed_pct": round(100.0 * unleashed_exec / len(unleashed_rows), 1) if unleashed_rows else 0.0,
         "by_tactic": by_tactic,
+        "by_goal": by_goal,
         "by_policy": by_policy,
         "runs": sorted({r.get("run_id", "") for r in rows}),
     }

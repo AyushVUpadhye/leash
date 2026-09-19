@@ -103,3 +103,13 @@ def deny_prod(monkeypatch, decision_cls):
 
     monkeypatch.setattr("common.authz.authorize", fake_authorize)
     return calls
+
+
+@pytest.fixture(autouse=True)
+def _no_incident_cooldown_between_tests():
+    """The duplicate-incident guard remembers alarms per process; tests must not share it."""
+    from agent import handler
+
+    handler._RECENT.clear()
+    yield
+    handler._RECENT.clear()

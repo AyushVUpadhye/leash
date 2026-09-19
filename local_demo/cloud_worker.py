@@ -106,8 +106,17 @@ def main(argv: list[str]) -> int:
     print(f"Leash worker: brain on this machine ({os.environ['OLLAMA_MODEL_ID']}), leash in AWS "
           f"({outputs['AuthzFunctionName']}). Polling {len(queues)} queues. Ctrl+C to stop.", flush=True)
     idle_rounds = 0
+    last_beat = 0.0
     while True:
         got = False
+        if time.time() - last_beat > 20:
+            try:
+                from common import audit
+
+                audit.write_heartbeat(os.environ["OLLAMA_MODEL_ID"], os.environ.get("COMPUTERNAME") or os.uname().nodename)
+                last_beat = time.time()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[heartbeat] failed: {exc}", flush=True)
         for name, url, fn in queues:
             resp = sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=1, WaitTimeSeconds=5,
                                        VisibilityTimeout=900)

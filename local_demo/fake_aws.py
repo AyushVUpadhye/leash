@@ -205,7 +205,7 @@ class _FakeDynamoDB:
         return {}
 
     def get_item(self, TableName, Key):
-        for it in WORLD.audit_items:
+        for it in reversed(WORLD.audit_items):
             if it.get("pk") == Key["pk"] and it.get("sk") == Key["sk"]:
                 return {"Item": it}
         return {}

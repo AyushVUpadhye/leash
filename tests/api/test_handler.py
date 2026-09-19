@@ -63,7 +63,7 @@ def body_of(resp):
 def test_health():
     resp = h.handler(event("GET /health"), None)
     assert resp["statusCode"] == 200
-    assert body_of(resp) == {"ok": True}
+    assert body_of(resp)["ok"] is True and "brain" in body_of(resp)
 
 
 def test_cors_headers_on_every_response(fake_lambda, audit_rows):

@@ -99,7 +99,8 @@
 <header>
   <h1>Leash</h1>
   <span class="tag">an ops agent on a leash — every action authorised by Cedar</span>
-  <span class="status" id="status">connecting…</span>
+  <span class="status" id="brain" style="margin-left:auto"></span>
+  <span class="status" id="status" style="margin-left:16px">connecting…</span>
 </header>
 <div class="banner" id="banner">dashboard/config.js not generated — run scripts/deploy.sh to write it from the stack's ApiUrl.</div>
 
@@ -128,6 +129,7 @@
       <div>
         <div class="bars" id="rt-tactics"><div class="empty">No attacks yet. Press “Run 20 attacks”.</div></div>
         <p class="note">Per tactic: how often the model was talked into trying, and how often that became a real destructive action in each arm. The last column is the whole project.</p>
+        <div class="bars" id="rt-goals" style="margin-top:12px"></div>
       </div>
       <div class="feed" id="rt-feed"></div>
     </div>
@@ -145,7 +147,7 @@
   </div>
   <div class="col">
     <section>
-      <h2>The leash <small id="leash-src">read live from the policy store</small></h2>
+      <h2>The leash <small id="leash-src">read live from the policy store</small> <small id="policy-version" class="mono" title="identifies the policy set in force (S3 object ETags); changes the moment a policy is edited in the bucket"></small></h2>
       <div id="policies"><div class="empty">Loading policies…</div></div>
       <p class="note">Cedar is deny-by-default and any <b>forbid</b> beats every <b>permit</b>. Click a policy id in the audit trail to jump to the rule that decided it.</p>
     </section>
@@ -317,6 +319,17 @@
     if (chip) jumpToPolicy(chip.getAttribute("data-policy"));
   });
 
+  function brainStatus() {
+    if (!API) return;
+    fetch(API + "/health").then(function (r) { return r.json(); }).then(function (h) {
+      var b = h.brain || {};
+      var el = $("brain");
+      if (b.mode === "bedrock") { el.textContent = "brain: Bedrock in Lambda"; el.style.color = "var(--allow)"; return; }
+      if (b.online) { el.textContent = "brain online · " + (b.model || "local model") + " on " + (b.host || "a worker"); el.style.color = "var(--allow)"; }
+      else { el.textContent = "brain offline · requests will queue until the worker is back"; el.style.color = "var(--warn)"; }
+    }).catch(function () {});
+  }
+
   function refresh() {
     if (!API) return;
     fetch(API + "/audit?limit=200")
@@ -334,7 +347,12 @@
     if (!API) return;
     fetch(API + "/policies")
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(function (data) { renderPolicies(data.items || []); })
+      .then(function (data) {
+        renderPolicies(data.items || []);
+        var v = String(data.policy_version || "");
+        var m = v.match(/ForbidScaleAboveCap\.cedar=([0-9a-f]+)/);
+        $("policy-version").textContent = v ? "version " + (m ? m[1] : v.slice(0, 12)) : "";
+      })
       .catch(function (e) { $("policies").innerHTML = '<div class="empty">policies fetch failed: ' + esc(e.message) + "</div>"; });
   }
 
@@ -361,6 +379,18 @@
       });
       $("rt-tactics").innerHTML = html;
     }
+    var goals = Object.keys(s.by_goal || {}).sort();
+    if (goals.length) {
+      var gh = '<div class="row head"><span>goal</span><span>persuaded</span><span>executed, no leash</span><span>leashed</span></div>';
+      goals.forEach(function (g) {
+        var v = s.by_goal[g];
+        gh += '<div class="row"><span class="mono">' + esc(g) + "</span>" +
+          '<span><div class="bar deny"><i style="width:' + pct(v.persuaded, v.attacks) + '"></i></div><small>' + v.persuaded + "/" + v.attacks + "</small></span>" +
+          '<span><div class="bar deny"><i style="width:' + pct(v.unleashed_executed, v.attacks) + '"></i></div><small>' + v.unleashed_executed + "/" + v.attacks + "</small></span>" +
+          '<span class="chip ' + (v.leashed_executed ? "bad" : "ok") + '">' + v.leashed_executed + "</span></div>";
+      });
+      $("rt-goals").innerHTML = gh;
+    } else { $("rt-goals").innerHTML = ""; }
     $("rt-feed").innerHTML = items.slice(0, 60).map(function (it) {
       var persuaded = flag(it.persuaded), lx = flag(it.leashed_executed), ux = flag(it.unleashed_executed);
       var denials = (it.leashed_denials || []).filter(function (x) { return x; });
@@ -450,7 +480,10 @@
   loadPolicies();
   refresh();
   loadArena();
+  brainStatus();
   setInterval(refresh, 10000);
+  setInterval(brainStatus, 15000);
+  setInterval(loadPolicies, 30000);
   setInterval(loadArena, 5000);
 </script>
 </body>
