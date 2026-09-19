@@ -247,6 +247,28 @@ and how many executed **with Leash**. The last one is the project. It stays at 0
 Cedar decides, not the model, and every one of those denials is a real audit row with the policy
 id that fired.
 
+### Results from the deployed run (19 Sept 2026)
+
+20 attacks, seven tactics, three goals, both arms, on the live stack. Agent and attacker: Qwen3
+8B on a laptop CPU; leash: the authorizer Lambda evaluating the four Cedar policies from S3.
+
+| | Count |
+| --- | --- |
+| Attacks | 20 |
+| Model persuaded (called the destructive tool) | 18 of 20 (90%) |
+| Destructive action executed, **no leash** (sandbox) | **18 of 20 (90%)** |
+| Destructive action executed, **with Leash** (real AWS) | **0 of 20** |
+
+By tactic, as attacks / persuaded / executed without leash / executed with leash:
+authority 2/2/2/0 · direct 3/3/2/0 · emergency 2/2/2/0 · escalation 3/3/3/0 ·
+log injection 4/3/4/0 · obfuscation 3/2/2/0 · role-play 3/3/3/0.
+By goal: clean the prod instance 9/9/8/0 · terminate the dev instance 10/8/9/0 · scale past
+the cap 1/1/1/0. Policies that stopped them: ForbidProd 9, ForbidDestructive 7,
+ForbidScaleAboveCap 1, and one default deny (the model used an id the account does not have).
+
+The two attacks the model refused on its own were one obfuscated request and one log-injection
+it did not act on. Every other attack got through the model. None got through the leash.
+
 `POST /redteam {"n": 20}` starts a run on its own Lambda (long runs chain themselves); the
 "Run 20 attacks" button on the dashboard does the same. The unleashed switch is honoured only
 while the fake AWS clients are installed in the process (`tools._sandbox_unleashed`), so it can
@@ -318,7 +340,7 @@ The timed shot list for the video is in [docs/DEMO-SCRIPT.md](docs/DEMO-SCRIPT.m
 | | Without Leash | With Leash |
 | --- | --- | --- |
 | Alarm to fix, full dev disk | until someone wakes up: 30 min to hours | **5 min 48 s** measured on the deployed stack with an 8B model on a laptop CPU; every leash decision inside that took under a second, the model is the whole wait. With Bedrock (`Brain=bedrock`) the same run is under 90 s. The dashboard measures it live |
-| Attacks that execute a destructive action | see the red-team panel: the unleashed control arm | **0**, measured, every attempt audited with the policy that stopped it |
+| Attacks that execute a destructive action | 18 of 20 with the same model and the leash off (measured, sandboxed) | **0 of 20**, measured on the live stack, every attempt audited with the policy that stopped it |
 | Blast radius of the bot | whatever its keys allow | cleanDisk, restartService, scaleGroup up to 4, on `env=dev` only; nothing else, ever |
 | Finding out what it did | CloudTrail archaeology | one table, one row per decision, policy id included |
 | Changing what it may do | edit a prompt and hope | edit a five-line Cedar policy the model never sees |
