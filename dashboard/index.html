@@ -5,10 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leash — audit trail</title>
 <style>
+  /* One set of tokens, two schemes. Everything below uses a token; the light scheme only swaps
+     values, so dark and light stay the same layout with the same meaning per colour. */
   :root {
-    --bg: #14161a; --panel: #1d2026; --line: #2c3038; --text: #e8eaed; --muted: #9aa0a8;
+    color-scheme: dark;
+    --bg: #14161a; --panel: #1d2026; --line: #2c3038; --text: #e8eaed; --text-2: #cfd3da; --muted: #9aa0a8;
     --allow: #2ecc71; --deny: #ff5f5f; --accent: #7aa2ff; --warn: #ffb454;
+    --chip: #2a2e37; --btn-fg: #0b1020;
+    --deny-wash: rgba(255, 95, 95, 0.06); --accent-wash: rgba(122, 162, 255, 0.06);
+    --allow-tint: rgba(46, 204, 113, 0.18); --deny-tint: rgba(255, 95, 95, 0.18); --accent-ring: rgba(122, 162, 255, 0.35);
+    --banner-bg: #4a2a10; --banner-line: #b86b1e; --banner-fg: #ffd9a8;
     --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg: #f4f5f7; --panel: #ffffff; --line: #d9dde3; --text: #1b1f26; --text-2: #3a404a; --muted: #5f6672;
+      --allow: #1e9e5a; --deny: #d93636; --accent: #2f5fd6; --warn: #b26a00;
+      --chip: #e9ecf1; --btn-fg: #ffffff;
+      --deny-wash: rgba(217, 54, 54, 0.05); --accent-wash: rgba(47, 95, 214, 0.06);
+      --allow-tint: rgba(30, 158, 90, 0.14); --deny-tint: rgba(217, 54, 54, 0.12); --accent-ring: rgba(47, 95, 214, 0.3);
+      --banner-bg: #fff4e5; --banner-line: #e0a04a; --banner-fg: #6b3d00;
+    }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -16,7 +34,7 @@
   header h1 { margin: 0; font-size: 26px; letter-spacing: 0.5px; }
   header .tag { color: var(--muted); font-size: 15px; }
   header .status { margin-left: auto; color: var(--muted); font-size: 14px; font-family: var(--mono); }
-  .banner { display: none; margin: 16px 28px 0; padding: 12px 16px; border-radius: 8px; background: #4a2a10; border: 1px solid #b86b1e; color: #ffd9a8; font-family: var(--mono); }
+  .banner { display: none; margin: 16px 28px 0; padding: 12px 16px; border-radius: 8px; background: var(--banner-bg); border: 1px solid var(--banner-line); color: var(--banner-fg); font-family: var(--mono); }
 
   /* stat tiles: the numbers a judge should walk away with */
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 20px 28px 0; }
@@ -37,28 +55,28 @@
   .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  td.result { font-size: 13px; color: #cfd3da; max-width: 340px; overflow-wrap: anywhere; }
+  td.result { font-size: 13px; color: var(--text-2); max-width: 340px; overflow-wrap: anywhere; }
   th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
   td.mono { font-family: var(--mono); font-size: 14px; }
   td.time { white-space: nowrap; color: var(--muted); font-family: var(--mono); font-size: 13px; }
-  tr.deny td { background: rgba(255, 95, 95, 0.06); }
-  tr.incident-head td { background: rgba(122, 162, 255, 0.06); color: var(--muted); font-size: 12px; font-family: var(--mono); padding: 5px 10px; }
+  tr.deny td { background: var(--deny-wash); }
+  tr.incident-head td { background: var(--accent-wash); color: var(--muted); font-size: 12px; font-family: var(--mono); padding: 5px 10px; }
   .pill { display: inline-block; padding: 3px 12px; border-radius: 999px; font-weight: 700; font-size: 13px; letter-spacing: 1px; }
-  .pill.allow { background: rgba(46, 204, 113, 0.18); color: var(--allow); border: 1px solid var(--allow); }
-  .pill.deny { background: rgba(255, 95, 95, 0.18); color: var(--deny); border: 1px solid var(--deny); }
-  .policy { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 6px; background: #2a2e37; font-family: var(--mono); font-size: 12px; cursor: pointer; border: 1px solid transparent; }
+  .pill.allow { background: var(--allow-tint); color: var(--allow); border: 1px solid var(--allow); }
+  .pill.deny { background: var(--deny-tint); color: var(--deny); border: 1px solid var(--deny); }
+  .policy { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 6px; background: var(--chip); font-family: var(--mono); font-size: 12px; cursor: pointer; border: 1px solid transparent; }
   .policy:hover { border-color: var(--accent); }
   .empty { color: var(--muted); padding: 24px 10px; text-align: center; }
 
   /* the leash: the policies, verbatim, from the store that enforces them */
   .cedar { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--bg); transition: box-shadow .2s, border-color .2s; }
   .cedar.permit { border-left: 3px solid var(--allow); } .cedar.forbid { border-left: 3px solid var(--deny); }
-  .cedar.flash { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122, 162, 255, 0.35); }
+  .cedar.flash { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
   .cedar .head { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 13px; }
   .cedar .effect { font-size: 11px; font-weight: 700; letter-spacing: 1px; padding: 1px 7px; border-radius: 999px; }
   .cedar.permit .effect { color: var(--allow); border: 1px solid var(--allow); } .cedar.forbid .effect { color: var(--deny); border: 1px solid var(--deny); }
   .cedar .desc { color: var(--muted); font-size: 12px; margin: 4px 0 6px; }
-  .cedar pre { margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; line-height: 1.4; color: #cfd3da; }
+  .cedar pre { margin: 0; white-space: pre-wrap; font-family: var(--mono); font-size: 12px; line-height: 1.4; color: var(--text-2); }
 
   /* red team: attacker model vs the leash, with the unleashed control arm */
   .arena { grid-column: 1 / -1; }
@@ -74,25 +92,55 @@
   @media (max-width: 1000px) { .arena-grid { grid-template-columns: 1fr; } }
   .bars .row { display: grid; grid-template-columns: 120px 1fr 1fr 60px; gap: 10px; align-items: center; font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--line); }
   .bars .row.head { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-  .bar { height: 10px; border-radius: 5px; background: #2a2e37; overflow: hidden; }
+  .bar { height: 10px; border-radius: 5px; background: var(--chip); overflow: hidden; }
   .bar i { display: block; height: 100%; }
   .bar.deny i { background: var(--deny); } .bar.allow i { background: var(--allow); }
   .feed { max-height: 420px; overflow-y: auto; font-size: 13px; }
   .feed .atk { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--bg); }
   .feed .atk .meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-family: var(--mono); font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-  .feed .atk .msg { white-space: pre-wrap; color: #cfd3da; max-height: 64px; overflow: hidden; }
+  .feed .atk .msg { white-space: pre-wrap; color: var(--text-2); max-height: 64px; overflow: hidden; }
   .feed .atk .arms { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
   .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .5px; border: 1px solid; }
   .chip.ok { color: var(--allow); border-color: var(--allow); } .chip.bad { color: var(--deny); border-color: var(--deny); } .chip.dim { color: var(--muted); border-color: var(--line); }
 
+  /* incident timeline: one row per incident, a bar from its start to its last decision */
+  .timeline { min-width: 560px; }
+  .tl-row { display: grid; grid-template-columns: 220px 1fr 84px; gap: 12px; align-items: center; padding: 7px 8px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+  .tl-row:hover { background: var(--accent-wash); }
+  .tl-row.selected { border-color: var(--accent); background: var(--accent-wash); }
+  .tl-row .name { font-family: var(--mono); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-row .name small { display: block; color: var(--muted); font-size: 11px; }
+  .tl-row .track { position: relative; height: 14px; }
+  .tl-row .track .base { position: absolute; top: 5px; left: 0; height: 4px; border-radius: 2px; background: var(--chip); }
+  .tl-row .track .seg { position: absolute; top: 0; width: 6px; height: 14px; border-radius: 3px; transform: translateX(-3px); }
+  .tl-row .track .seg.allow { background: var(--allow); } .tl-row .track .seg.deny { background: var(--deny); }
+  .tl-row .track .seg:hover { outline: 2px solid var(--accent); }
+  .tl-row .elapsed { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+  .tl-hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .tl-hint a { color: var(--accent); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+  .dot.allow { background: var(--allow); } .dot.deny { background: var(--deny); }
+
+  /* mobile: the tiles are already 2x2 under 800px; below 600px tighten padding and let the
+     wide things (timeline, table) scroll sideways instead of squeezing */
+  @media (max-width: 600px) {
+    header { padding: 14px 16px; gap: 8px; } header h1 { font-size: 22px; }
+    header .status { margin-left: 0; width: 100%; }
+    .stats, main { padding-left: 14px; padding-right: 14px; }
+    .stats { gap: 10px; } .stat .value { font-size: 24px; } .big .stat .value { font-size: 22px; white-space: nowrap; }
+    section { padding: 12px 12px; }
+    .tl-row { grid-template-columns: 150px 1fr 70px; gap: 8px; }
+    .bars .row { grid-template-columns: 90px 1fr 1fr 48px; }
+  }
+
   textarea { width: 100%; min-height: 96px; resize: vertical; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
-  button { margin-top: 10px; padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent); color: #0b1020; font-weight: 700; font-size: 15px; cursor: pointer; }
+  button { margin-top: 10px; padding: 10px 18px; border: 0; border-radius: 8px; background: var(--accent); color: var(--btn-fg); font-weight: 700; font-size: 15px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: wait; }
   .examples { margin: 8px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 13px; }
   .examples li { cursor: pointer; margin: 4px 0; } .examples li:hover { color: var(--text); }
   .note { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
   #reply { margin-top: 14px; padding: 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); white-space: pre-wrap; font-size: 15px; min-height: 60px; }
-  #reply.err { border-color: var(--deny); color: #ffb3b3; }
+  #reply.err { border-color: var(--deny); color: var(--deny); }
 </style>
 </head>
 <body>
@@ -136,7 +184,12 @@
   </section>
   <div class="col">
     <section>
-      <h2>Audit trail <small>newest first · refreshes every 10 s</small></h2>
+      <h2>Incidents <small>one row each · click to filter the trail</small></h2>
+      <div class="scroll"><div class="timeline" id="timeline"><div class="empty">No incidents yet.</div></div></div>
+      <p class="tl-hint"><span><i class="dot allow"></i>allowed</span><span><i class="dot deny"></i>denied</span><span>bar: incident start → last decision</span><a href="#" id="tl-clear" hidden>show all incidents</a></p>
+    </section>
+    <section>
+      <h2>Audit trail <small id="trail-sub">newest first · refreshes every 10 s</small></h2>
       <div class="scroll">
       <table>
         <thead><tr><th>Time (UTC)</th><th>Action</th><th>Resource</th><th>Env</th><th>Decision</th><th>Policies</th><th>Result</th></tr></thead>
@@ -259,6 +312,68 @@
     $("n-ttf-sub").textContent = med == null ? "no auto-fixed alarm yet" : "median over " + fixes.length + " auto-fixed alarm" + (fixes.length === 1 ? "" : "s") + " · no human involved";
   }
 
+  // --- incident timeline ------------------------------------------------------------------
+  // Rows arrive newest first. An incident is one pk: its start is in the id (or, for ids
+  // without a timestamp, its earliest row) and it ends at its last decision.
+  var selectedIncident = null;
+  var lastItems = [];
+
+  function incidentsOf(items) {
+    var byPk = {}, order = [];
+    items.forEach(function (it) {
+      if (!byPk[it.pk]) { byPk[it.pk] = { pk: it.pk, alarm: it.alarm_name || "", rows: [] }; order.push(it.pk); }
+      byPk[it.pk].rows.push(it);
+    });
+    return order.map(function (pk) {
+      var inc = byPk[pk];
+      var times = inc.rows.map(function (r) { return parseSk(r.sk); }).filter(function (t) { return t != null; });
+      var start = parseIncidentStart(pk);
+      if (start == null && times.length) start = Math.min.apply(null, times);
+      var end = times.length ? Math.max.apply(null, times) : start;
+      inc.start = start; inc.end = end;
+      inc.elapsed = (start != null && end != null) ? Math.max(0, (end - start) / 1000) : null;
+      return inc;
+    }).filter(function (inc) { return inc.start != null; });
+  }
+
+  function renderTimeline(items) {
+    var incs = incidentsOf(items);
+    if (!incs.length) { $("timeline").innerHTML = '<div class="empty">No incidents yet.</div>'; return; }
+    // Bars share one scale so a 6-minute alarm fix and a 2-second denial read at a glance.
+    var longest = Math.max.apply(null, incs.map(function (i) { return i.elapsed || 0; })) || 1;
+    $("timeline").innerHTML = incs.map(function (inc) {
+      var width = Math.max(4, Math.round(100 * (inc.elapsed || 0) / longest));
+      var span = Math.max(1, (inc.end - inc.start));
+      var segs = inc.rows.map(function (r) {
+        var t = parseSk(r.sk);
+        var x = t == null ? 100 : Math.round(100 * (t - inc.start) / span);
+        var deny = String(r.decision).toUpperCase() === "DENY";
+        var clock = (String(r.sk || "").match(/T(\d{2}:\d{2}:\d{2})/) || [])[1] || "";
+        return '<i class="seg ' + (deny ? "deny" : "allow") + '" style="left:' + Math.min(100, Math.max(0, x)) + '%" title="' +
+          esc(r.action) + " · " + (deny ? "DENY " : "ALLOW ") + esc((r.policy_ids || []).join(", ")) + " · " + esc(clock) + 'Z"></i>';
+      }).join("");
+      var kind = inc.alarm ? "alarm " + inc.alarm : "human request";
+      var when = new Date(inc.start).toISOString().slice(11, 19) + "Z";
+      return '<div class="tl-row' + (inc.pk === selectedIncident ? " selected" : "") + '" data-pk="' + esc(inc.pk) + '">' +
+        '<div class="name" title="' + esc(inc.pk) + '">' + esc(kind) + "<small>" + when + " · " + inc.rows.length + " decision" + (inc.rows.length === 1 ? "" : "s") + "</small></div>" +
+        '<div class="track"><div class="base" style="width:' + width + '%"></div><div style="position:absolute;left:0;top:0;height:14px;width:' + width + '%">' + segs + "</div></div>" +
+        '<div class="elapsed">' + fmtSeconds(inc.elapsed) + "</div></div>";
+    }).join("");
+  }
+
+  function selectIncident(pk) {
+    selectedIncident = (pk && pk !== selectedIncident) ? pk : null;
+    $("tl-clear").hidden = !selectedIncident;
+    $("trail-sub").textContent = selectedIncident ? "incident " + selectedIncident : "newest first · refreshes every 10 s";
+    renderTimeline(lastItems);
+    render(selectedIncident ? lastItems.filter(function (it) { return it.pk === selectedIncident; }) : lastItems);
+  }
+  document.addEventListener("click", function (e) {
+    var row = e.target.closest && e.target.closest(".tl-row");
+    if (row) { selectIncident(row.getAttribute("data-pk")); return; }
+    if (e.target.id === "tl-clear") { e.preventDefault(); selectIncident(null); }
+  });
+
   function policies(list) {
     if (!list || !list.length) return '<span class="policy" style="opacity:.5">none</span>';
     return list.map(function (p) { return '<span class="policy" data-policy="' + esc(p) + '">' + esc(p) + "</span>"; }).join("");
@@ -336,8 +451,10 @@
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (data) {
         var items = data.items || [];
+        lastItems = items;
         stats(items);
-        render(items);
+        renderTimeline(items);
+        render(selectedIncident ? items.filter(function (it) { return it.pk === selectedIncident; }) : items);
         $("status").textContent = "live · " + new Date().toISOString().slice(11, 19) + "Z";
       })
       .catch(function (e) { $("status").textContent = "audit fetch failed: " + e.message; });
