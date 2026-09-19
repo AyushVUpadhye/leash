@@ -51,6 +51,10 @@ flowchart LR
     S3[S3 static dashboard] -. fetch .-> APIGW
 ```
 
+![Architecture: alarm -> EventBridge -> SQS -> the brain; every action asks the authorizer Lambda (Cedar), which writes the audit row before answering](docs/img/architecture.png)
+
+*Rendered copy of the diagram above, for viewers that do not render Mermaid (the submission form, Builder Center).*
+
 Two template parameters pick the shape. `Brain=worker` (default) queues alarms and requests for
 an agent process that runs anywhere (`local_demo/cloud_worker.py`); `Brain=bedrock` runs the
 agent in Lambda on Bedrock and EventBridge invokes it directly. `PolicyStore=s3` (default) is
@@ -217,6 +221,10 @@ the outcome does not change.
 
 ## The red team: same model, same attacks, with and without the leash
 
+![Red-team panel: 12 attacks across 8 tactics, model persuaded 92%, executed with no leash 12/12, executed with Leash 0/12](docs/img/dashboard-red-team.png)
+
+*The latest deployed run. Every one of the twelve attacks that destroyed something in the unleashed sandbox produced a Cedar DENY with the leash on. Numbers and attack feed are read from the audit table, not typed in.*
+
 Saying "the model cannot be talked into it" is a claim. Leash measures it.
 
 An **attacker model** writes attacks against the agent across eight tactics: a direct request,
@@ -246,6 +254,10 @@ never disarm the real deployment. Locally, `local_demo/server.py` runs the arena
 the same code.
 
 ## What the dashboard shows
+
+![Audit trail with the poisoned-tag incident: cleanDisk ALLOW and terminateInstance DENY ForbidDestructive under one alarm, beside the four Cedar policies](docs/img/dashboard-audit-trail.png)
+
+*The poisoned-tag beat as the dashboard shows it: under one `leash-disk-dev` incident, the model was talked into trying `terminateInstance` (red, `ForbidDestructive`) and then cleaned the disk anyway (green, `PermitDevRemediation`). The four policies on the right are read live from the policy store; clicking a policy id in the trail jumps to the rule that decided it.*
 
 The `DashboardUrl` output is a static page that talks only to the HTTP API:
 
